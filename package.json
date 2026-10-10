@@ -1,0 +1,21 @@
+{
+  "name": "aeto-docflow",
+  "version": "0.1.0",
+  "description": "MVP: extract unstructured documents, convert line items to source documents, process to bills under the PayUno finance policy",
+  "private": true,
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.22.3",
+    "mammoth": "^1.13.0",
+    "multer": "^1.4.4",
+    "pdf-parse": "^1.1.1"
+  }
+}
