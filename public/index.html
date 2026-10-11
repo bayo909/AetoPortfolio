@@ -3,23 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DocFlow</title>
+<title>Aeto Connect</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<header class="top">
-  <div class="brand">DocFlow <span>unstructured document &rarr; source document &rarr; bill</span></div>
-  <nav id="tabs">
-    <button data-tab="upload">1 &middot; Upload</button>
-    <button data-tab="match">2 &middot; Source documents</button>
-    <button data-tab="process">3 &middot; Payment processing <b id="docCount" class="count"></b></button>
-    <button data-tab="bills">Bills <b id="billCount" class="count"></b></button>
-  </nav>
-</header>
-<main id="view"></main>
-<div id="toast" role="alert" hidden></div>
-<dialog id="policyDialog"><form method="dialog"><h3 id="policyTitle"></h3><pre id="policyText"></pre><button>Close</button></form></dialog>
+<div id="app"></div>
+<div id="modal" class="modal-wrap" hidden></div>
+<div id="toast" class="toast" hidden></div>
 <script src="app.js"></script>
 </body>
 </html>

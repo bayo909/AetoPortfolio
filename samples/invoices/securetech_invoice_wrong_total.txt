@@ -1,0 +1,12 @@
+TAX INVOICE
+From: SecureTech Nigeria Ltd
+Invoice No: INV-2026-0043
+Date: 20 Sep 2026
+Currency: NGN
+
+Description | Qty | Unit Price | Amount
+Penetration test | 1 | 900,000.00 | 900,000.00
+Security awareness training | 1 | 300,000.00 | 300,000.00
+Subtotal: 1,200,000.00
+VAT (7.5%): 90,000.00
+Total Due: 1,390,000.00
