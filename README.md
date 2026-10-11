@@ -48,3 +48,7 @@ Try it: click **Use sample payables pack**, choose *Payment Voucher* (line 1 mat
 `server.js` API · `src/matcher.js` line→event matching · `src/workflow.js` figures, journals, policy checks ·
 `src/service.js` lifecycle (draft → pending approval → approved → reviewed → billed) · `src/accounts.js` COA mapping ·
 `src/policy.js` policy chunks + thresholds · `public/` UI · `test/` unit + end-to-end service tests.
+
+## Further reading
+
+- [RT-FEPE business case study](docs/RT-FEPE_Case_Study.md) — the real-time financial entry processing vision and ROI analysis from the Sales, HR and Accounting perspectives.
