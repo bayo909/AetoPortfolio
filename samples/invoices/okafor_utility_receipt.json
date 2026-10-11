@@ -1,0 +1,11 @@
+{
+  "number": "OP-7790",
+  "date": "2026-10-02",
+  "currency": "USD",
+  "vendor": "Okafor & Partners",
+  "vat_rate": 0,
+  "lines": [
+    { "description": "Flight Lagos to Abuja for regulatory meeting", "qty": 2, "unit_price": 180, "amount": 360 },
+    { "description": "Hotel accommodation, 2 nights", "qty": 2, "unit_price": 95, "amount": 190 }
+  ]
+}

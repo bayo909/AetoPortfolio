@@ -1,12 +1,13 @@
 {
-  "name": "aeto-docflow",
+  "name": "aeto-connect",
   "version": "0.1.0",
-  "description": "MVP: extract unstructured documents, convert line items to source documents, process to bills under the PayUno finance policy",
+  "description": "Slack-style B2B workspaces: buyers request source documents from vendors, the RT-FEPE engine posts balanced ledger entries, payments are released from chat",
   "private": true,
   "type": "commonjs",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "demo": "DEMO=1 node server.js",
     "test": "node --test \"test/*.test.js\""
   },
   "engines": {

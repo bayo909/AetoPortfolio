@@ -1,0 +1,15 @@
+TAX INVOICE
+From: SecureTech Nigeria Ltd
+Invoice No: INV-2026-0042
+PO Number: PO-1001
+Date: 12 Sep 2026
+Due Date: 12 Oct 2026
+Currency: NGN
+
+Description | Qty | Unit Price | Amount
+Cybersecurity monitoring (September 2026) | 1 | 1,200,000.00 | 1,200,000.00
+Incident response retainer | 2 | 250,000.00 | 500,000.00
+Subtotal: 1,700,000.00
+VAT (7.5%): 127,500.00
+Withholding tax: 85,000.00
+Total Due: 1,827,500.00
