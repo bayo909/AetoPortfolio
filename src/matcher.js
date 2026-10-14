@@ -17,6 +17,16 @@ const CANON = {
   withheld: 'withhold', committed: 'commit', commitment: 'commit', fulfilled: 'fulfil', fulfilment: 'fulfil',
 };
 
+// Everyday wording -> extra concept tokens, so memos ("hotel and flights for the Abuja trip, please reimburse")
+// can reach master-data phrases such as "Travel Expense Claimed".
+const EXPAND = {
+  hotel: ['travel'], accommodation: ['travel'], airfare: ['travel'], flight: ['travel'], taxi: ['travel'], transportation: ['travel'], per: [],
+  reimburse: ['claim'], payment: ['settle'], refund: ['claim'],
+  electricity: ['utility'], water: ['utility'], internet: ['utility'], power: ['utility'],
+  legal: ['professional'], audit: ['professional'], consulting: ['professional'], consultancy: ['professional'], advisory: ['professional'], counsel: ['professional'],
+  laptop: ['good'], equipment: ['good'], stock: ['good'], material: ['good'],
+};
+
 function stem(w) {
   if (CANON[w]) return CANON[w];
   if (w.length > 5 && w.endsWith('ies')) w = w.slice(0, -3) + 'y';
@@ -28,8 +38,14 @@ function stem(w) {
 }
 
 function tokenize(text) {
-  return String(text).toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ')
-    .filter(w => w && !STOP.has(w) && !/^\d+$/.test(w)).map(stem);
+  const out = [];
+  for (const raw of String(text).toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ')) {
+    if (!raw || STOP.has(raw) || /^\d+$/.test(raw)) continue;
+    const t = stem(raw);
+    out.push(t);
+    for (const x of EXPAND[t] || []) out.push(x);
+  }
+  return out;
 }
 
 function coverage(phraseTokens, lineSet) {
@@ -65,4 +81,19 @@ function matchLines(lines, masterRows, sourceDocument) {
   });
 }
 
-module.exports = { tokenize, matchLines, scoreLine, prepareRows, MIN_SCORE };
+// When one phrase fits several document types equally well, prefer the type earlier in this list.
+const TYPE_PRIORITY = ['Expense Claim', 'Payment Voucher', 'Vendor Invoice', 'Purchase Order', 'Payroll File', 'Tax Assessment',
+  'Loan Agreement', 'Contract', 'Inventory Receipt', 'Customer Invoice', 'Sales Invoice', 'Sales Receipt', 'Bank Statement', 'Quote'];
+
+/** Best Financial Event for a sentence across every source-document type (or the allowed subset). */
+function bestMatchAcross(text, prepared, allowedTypes) {
+  const pool = allowedTypes ? prepared.filter(p => allowedTypes.includes(p.row.sourceDocument)) : prepared;
+  const ranked = scoreLine(text, pool);
+  if (!ranked.length || ranked[0].score < MIN_SCORE) return { matched: false, best: ranked[0] || null, candidates: ranked.slice(0, 3) };
+  const top = ranked[0].score;
+  const pri = r => { const i = TYPE_PRIORITY.indexOf(r.sourceDocument); return i < 0 ? 99 : i; };
+  const best = ranked.filter(m => m.score >= top - 0.001).sort((a, b) => pri(a.row) - pri(b.row) || a.row.index - b.row.index)[0];
+  return { matched: true, best, candidates: ranked.slice(0, 3) };
+}
+
+module.exports = { tokenize, matchLines, scoreLine, prepareRows, bestMatchAcross, MIN_SCORE, TYPE_PRIORITY };

@@ -27,6 +27,7 @@ function eventSide(row) {
 }
 
 function taxApplicability(row) {
+  if (row.sourceDocument === 'Quote') return { side: 'none', vat: true, wht: false }; // a quote carries VAT but posts nothing
   const side = eventSide(row);
   const vat = (side === 'purchase' && row.debitAccount !== 'Input VAT') || side === 'sale';
   const wht = side === 'purchase' && row.debitAccount !== 'Input VAT';
@@ -104,6 +105,7 @@ function assess(doc, masterRows, { today = new Date().toISOString().slice(0, 10)
   if (!lines.length) submit.push(e('At least one line item is required'));
   lines.forEach((l, i) => {
     const tag = `Line ${i + 1} (${l.row.financialEvent})`;
+    if (l.figureSource === 'fictitious') submit.push(e(`${tag}: figures are illustrative placeholders — correct them, or use "Confirm figures" once checked`));
     if (l.figs.invalid) submit.push(e(`${tag}: quantity, unit price, VAT and WHT must be numbers`));
     else if (!(l.figs.net > 0)) submit.push(e(`${tag}: enter quantity/unit price — net amount must be greater than 0`));
     if (l.figs.vat < 0 || l.figs.wht < 0) submit.push(e(`${tag}: VAT and WHT cannot be negative`));
@@ -129,6 +131,13 @@ function assess(doc, masterRows, { today = new Date().toISOString().slice(0, 10)
       submit.push(w('Claim is older than 15 business days — attach a late-submission justification in the business purpose', 'EXP-POL-001'));
     if (!h.receiptsAttached) submit.push(w('No supporting receipts confirmed (required where available)', 'EXP-POL-001'));
   }
+  const origin = doc.origin || {};
+  if (origin.ocrConfidence != null && origin.ocrConfidence < 75)
+    submit.push(w(`OCR confidence is ${origin.ocrConfidence}% — verify every figure against the original document`, 'RAG-CTRL-001'));
+  for (const n of origin.notes || []) submit.push(w(n));
+  if (h.counterparty && !h.partyId) submit.push(w('Counterparty is not in the employee/vendor/customer master — verify identity, tax and banking details before approval', 'PROC-POL-001'));
+  if (lines.some(l => l.figs.tax.side === 'purchase') && !String(h.accountNumber || '').trim())
+    submit.push(w('No beneficiary bank account on the document — required before payment', 'AP-EVT-002'));
   const unusedCommitment = lines.some(l => l.row.journalEntry === 'No Journal Entry');
   if (unusedCommitment) submit.push(w('At least one line is a commitment with no GL posting — it will convert to a bill with no journal lines', 'PROC-EVT-002'));
 

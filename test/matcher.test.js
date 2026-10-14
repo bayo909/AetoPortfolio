@@ -5,9 +5,9 @@ const { matchLines, tokenize } = require('../src/matcher');
 
 const master = loadMasterData();
 
-test('master data loads all 44 events across 13 source documents', () => {
-  assert.strictEqual(master.rows.length, 44);
-  assert.strictEqual(master.sourceDocuments.length, 13);
+test('master data loads the 44 master events plus the supplemental Quote event', () => {
+  assert.strictEqual(master.rows.length, 45);
+  assert.strictEqual(master.sourceDocuments.length, 14);
 });
 
 test('tokenizer folds synonyms and inflections', () => {

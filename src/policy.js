@@ -39,6 +39,8 @@ const ADDITIONAL_APPROVAL = {
   'Purchase Order': 'Contractual commitment',
 };
 
+const COMPANY = { name: 'Apex Insurance & Financial Services Ltd.', address: 'Lagos, Nigeria', currency: 'NGN' }; // policy document header
+
 const LOW_CONFIDENCE = 0.7; // RAG-CTRL-001: below this the line is routed to a Finance Reviewer for explicit acknowledgement
 
 const THREE_WAY_CHECKS = ['Supplier', 'Quantity', 'Price', 'Description', 'Tax treatment', 'Currency']; // PROC-CTRL-001
@@ -70,5 +72,5 @@ function businessDaysBetween(fromIso, toIso) {
 
 module.exports = {
   loadPolicyChunks, approvalTier, requiredApprovals, businessDaysBetween,
-  LOW_CONFIDENCE, THREE_WAY_CHECKS, VENDOR_CHECKS, APPROVAL_TIERS, ADDITIONAL_APPROVAL,
+  COMPANY, LOW_CONFIDENCE, THREE_WAY_CHECKS, VENDOR_CHECKS, APPROVAL_TIERS, ADDITIONAL_APPROVAL,
 };

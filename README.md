@@ -1,50 +1,71 @@
-# DocFlow — unstructured document → source document → bill (MVP)
+# DocFlow — document intake, billing and payment (MVP)
 
-A small web app that turns an uploaded, unstructured document into source documents
-(payment voucher, expense claim, purchase order, …) and then processes each one under the
-PayUno Enterprise Finance & Operations policy until it becomes a bill with a balanced journal entry.
+Uploaded documents are stored as **records**, processed by one of two pipelines, land on a **Billing** page for
+corrections, go through the PayUno policy approvals, and become **bills** that are then paid.
 
-## How it works
+```
+upload ──► record (file stored) ──► process ──► Billing (corrections) ──► approvals ──► finance review ──► Bill ──► payment
+            structured | unstructured
+```
 
-1. **Upload** (`.docx`, `.pdf`, `.txt`, `.md`, `.csv`). Text is extracted into numbered line items held **in memory**.
-2. **Select source document.** Pick a type from `data/Financial_Master_Data.csv` (Payment Voucher, Vendor Invoice,
-   Purchase Order, Contract, Expense Claim, …). Every line item is matched to that type's **Financial Event** and
-   **High Frequency Phrase** (stop-word removal, light stemming, synonyms such as supplier = vendor; exact phrase = 100 %).
-   Each line you keep becomes its **own source document** with a line item carrying the matched event, debit/credit
-   accounts and journal template — **no figures**; you enter quantity, unit price, VAT and WHT.
-   Unmatched lines are listed and can be assigned an event manually (low confidence → Finance Reviewer must confirm).
-3. **Payment processing** — rules read from `data/PayUno_Finance_Operations_Policy.docx` (chunks are served in the UI):
-   | Step | Control (policy chunk) |
-   |---|---|
-   | Complete figures | counterparty, department, cost centre, purpose; VAT/WHT only where the event allows (TAX-EVT-001/002); purchase request > ₦100k, quotation > ₦500k, PO + receipt for vendor invoices, invoice ref on vendor payments (PROC-POL-001, AP-EVT-002); expense-claim 15-business-day warning (EXP-POL-001) |
-   | Approvals | amount tiers ₦100k / 500k / 2m / 10m (FIN-POL-001) + additional approver for payroll, tax, loan, contract, PO |
-   | Finance review | independent reviewer; three-way match + vendor verification (PROC-CTRL-001); low-confidence acknowledgement (RAG-CTRL-001); COA code for accounts the policy COA doesn't name (COA-001) |
-   | Convert to bill | a different Payment Processor; journal must balance; bill gets a number, control trail, CSV export |
+## 1 · Structured documents (invoices, quotes, receipts)
 
-   Segregation of duties (FIN-POL-002 / GOV-001): preparer, each approver, finance reviewer and payment processor must be
-   different people, and nobody may act on a document where they are the counterparty.
+They already are source documents. After upload the record is stored, then:
+text is read (OCR for images and scanned PDFs, direct extraction for text PDFs/.docx) →
+document number, date, party, line items (description / qty / unit price), VAT, WHT and total are parsed →
+each line is matched to a Financial Event → the result is posted as a billing document.
+Document type is auto-detected (quote / receipt / invoice) or chosen: *Invoice (payable)* → Vendor Invoice,
+*Invoice (receivable)* → Customer Invoice, *Quote* → Quote, *Receipt* → Sales Receipt.
+The party is matched to the vendor/customer master (address, bank account, tax ID come from there).
+
+## 2 · Unstructured documents (approved source documents, proposals, notes, memos)
+
+Text is extracted → **summarised to the key financial events only** (sentences with amounts, payment/expense wording
+or a Financial Event match; chit-chat is dropped) → each event is matched to **Financial Event** and **High Frequency
+Phrase** in `data/Financial_Master_Data.csv` → source documents (Expense Claim, Payment Voucher, Vendor Invoice, …) are
+generated, one per document type and party, with line items billed at **illustrative (fictitious) figures**.
+The **source header** (name, address, account number, bank, department, cost centre) is pulled from the
+employee/vendor/customer master (**Parties** tab). Figures are deterministic placeholders (7.5 % VAT / 5 % WHT as in
+policy TAX-EVT-001/002), flagged *illustrative*, and cannot be submitted until corrected or confirmed in Billing.
+
+After either pipeline the **record page** shows the source document (image / PDF / rendered .docx / text) on the left and
+the processed document on the right (summary + generated documents, or the parsed invoice).
+
+## Billing → approval → bill → payment (`PayUno Enterprise Finance & Operations Policy`)
+
+| Step | Control (policy chunk) |
+|---|---|
+| Corrections | edit header (or pick from master), refs, events, figures. Required: counterparty, department, cost centre, purpose; purchase request > ₦100k, quotation > ₦500k, PO + receipt for vendor invoices, invoice ref on vendor payments (PROC-POL-001, PROC-CTRL-001, AP-EVT-002); VAT/WHT only where the event allows (TAX-EVT-001/002); OCR < 75 % and unknown-party warnings |
+| Approvals | amount tiers ₦100k / 500k / 2m / 10m (FIN-POL-001) + additional approver for payroll, tax, loan, contract and PO documents |
+| Finance review (final approval) | independent reviewer; three-way match + vendor verification; low-confidence acknowledgement (RAG-CTRL-001); COA code for accounts the policy chart doesn't name (COA-001). **On completion the document becomes a bill** with a balanced journal |
+| Payment (Bills page) | a Payment Processor independent of everyone before; beneficiary account required; posts Dr Payable / Cr Bank (AP-EVT-002) |
+
+Segregation of duties (FIN-POL-002 / GOV-001): preparer, each approver, finance reviewer and payment processor must be
+different people; nobody may act on a document where they are the counterparty.
 
 ## Run
 
 ```bash
 npm install
-npm start          # http://localhost:3000   (PORT=... to change)
+npm start                   # http://localhost:3000   (PORT, STORAGE_DIR to override)
 npm test
 ```
-Try it: click **Use sample payables pack**, choose *Payment Voucher* (line 1 matches) or *Vendor Invoice* (lines 3–6).
+Use the sample buttons on the Upload page (`samples/`: invoice image + PDF, memo, .docx proposal).
+State persists in `storage/` (uploaded files + `db.json`, git-ignored). OCR is offline (tesseract.js + bundled English data).
 
-## Known MVP limits
+## Known limits
 
-- **State is in memory** — restart the server and uploads, documents and bills are gone.
-- **No authentication.** Approver names are typed in; segregation checks compare names, not logged-in users.
-- No OCR: scanned PDFs/images produce no text. No `.xlsx`/`.doc`.
-- The master data has no *Quote* source document, so none is offered; add rows to the CSV and it appears automatically.
-- Many accounts in the master data (Revenue, Expense, Interest Expense, …) have no code in the policy chart of accounts;
-  the Finance Reviewer assigns a code within the correct range. `Input VAT` is mapped to 2310 because the COA has no input-VAT account.
-- Matching is lexical (tokens/synonyms), not semantic; WHT/VAT amounts are entered, not computed from rates.
+- No authentication: names are typed in; segregation checks compare names, not logged-in users.
+- Summary is extractive and rule-based (no LLM); matching is lexical (tokens, stems, synonyms). Parsing handles labelled
+  and tabular invoices, not arbitrary layouts. OCR quality bounds extraction quality; low confidence is flagged.
+- Scanned PDFs need `pdftoppm` (poppler-utils) on the server. English OCR only. Max 6 pages OCR'd per PDF.
+- The master data has no *Quote* type; `data/Supplemental_Financial_Events.csv` adds one (no GL posting) without touching your CSV.
+- Parties can be listed and added in the UI (edit via `PATCH /api/parties/:id`). Many master-data accounts (Revenue, Expense,
+  Interest Expense…) have no code in the policy chart of accounts; the finance reviewer assigns one in the right range.
 
 ## Layout
 
-`server.js` API · `src/matcher.js` line→event matching · `src/workflow.js` figures, journals, policy checks ·
-`src/service.js` lifecycle (draft → pending approval → approved → reviewed → billed) · `src/accounts.js` COA mapping ·
-`src/policy.js` policy chunks + thresholds · `public/` UI · `test/` unit + end-to-end service tests.
+`server.js` API · `src/pipeline.js` the two pipelines · `src/extract.js` + `src/ocr.js` text/OCR ·
+`src/structured.js` invoice parser · `src/summarize.js` key-event summary · `src/matcher.js` event matching ·
+`src/parties.js` master data · `src/figures.js` illustrative figures · `src/workflow.js` figures, journals, policy checks ·
+`src/service.js` records / documents / bills lifecycle · `src/store.js` persistence · `public/` UI · `test/` tests.

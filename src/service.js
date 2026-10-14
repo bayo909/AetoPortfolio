@@ -1,10 +1,15 @@
-// In-memory application state + document lifecycle:
-// upload -> source documents (draft) -> approval -> finance review -> bill.
+// Application state and document lifecycle.
+//   record (stored upload) --process--> billing document(s) --corrections--> approvals --> finance review --> bill --> payment
+const path = require('path');
 const { matchLines } = require('./matcher');
-const { assess, segregationError, norm } = require('./workflow');
-const { validateOverride, resolveAccount } = require('./accounts');
+const { assess, segregationError } = require('./workflow');
+const { validateOverride } = require('./accounts');
 const policy = require('./policy');
 const { toCsv } = require('./csv');
+const { createStore } = require('./store');
+const { extractDocument, docxHtml, mimeFor } = require('./extract');
+const { processStructured, processUnstructured, STRUCTURED_TYPES } = require('./pipeline');
+const { SEED, PARTY_FIELDS, KINDS } = require('./parties');
 
 class HttpError extends Error {
   constructor(status, message, issues) { super(message); this.status = status; this.issues = issues; }
@@ -13,33 +18,66 @@ class HttpError extends Error {
 const PREFIX = {
   'Payment Voucher': 'PV', 'Expense Claim': 'EC', 'Purchase Order': 'PO', 'Vendor Invoice': 'VI', 'Sales Invoice': 'SI',
   'Sales Receipt': 'SR', 'Customer Invoice': 'CI', 'Contract': 'CT', 'Bank Statement': 'BS', 'Payroll File': 'PF',
-  'Tax Assessment': 'TA', 'Loan Agreement': 'LA', 'Inventory Receipt': 'IR',
+  'Tax Assessment': 'TA', 'Loan Agreement': 'LA', 'Inventory Receipt': 'IR', 'Quote': 'QT',
 };
+const HEADER_KEYS = ['partyId', 'partyKind', 'counterparty', 'address', 'accountNumber', 'bankName', 'taxId', 'email', 'department', 'costCenter', 'documentDate', 'purpose', 'preparedBy'];
+const emptyReview = () => ({ threeWay: {}, vendorChecks: {}, ackLowConfidence: false, accountOverrides: {}, by: null, at: null });
+const PAYABLE_ACCOUNTS = ['Accounts Payable', 'Employee Payable'];
+const clone = o => JSON.parse(JSON.stringify(o));
 
-function createService({ master, chunks = {}, now = () => new Date() }) {
-  const uploads = new Map(), docs = new Map(), bills = new Map();
-  let docSeq = 0, billSeq = 0, idSeq = 0;
+function createService({ master, chunks = {}, storageDir = null, now = () => new Date() }) {
+  const store = createStore(storageDir);
+  const state = store.load() || { seq: { id: 0, doc: 0, bill: 0 }, records: {}, documents: {}, bills: {}, parties: clone(SEED) };
+  const buffers = new Map(); // memory-only fallback when there is no storage dir
+  const persist = () => store.save(state);
   const year = () => now().getFullYear();
   const today = () => now().toISOString().slice(0, 10);
-  const uid = p => `${p}_${++idSeq}`;
-  const mustGet = (map, id, what) => { const v = map.get(id); if (!v) throw new HttpError(404, `${what} not found`); return v; };
+  const uid = p => `${p}_${++state.seq.id}`;
+  const mustGet = (coll, id, what) => { const v = state[coll][id]; if (!v) throw new HttpError(404, `${what} not found`); return v; };
   const str = v => (v == null ? '' : String(v).trim());
+  const docs = () => Object.values(state.documents);
+
+  /* ----------------------------- documents ----------------------------- */
+  function makeDocument(spec) {
+    const prefix = PREFIX[spec.sourceDocument] || spec.sourceDocument.split(/\s+/).map(w => w[0]).join('').toUpperCase();
+    const d = {
+      id: uid('doc'), number: `${prefix}-${year()}-${String(++state.seq.doc).padStart(5, '0')}`,
+      sourceDocument: spec.sourceDocument, status: 'draft', createdAt: now().toISOString(),
+      origin: { recordId: spec.record.id, intake: spec.intake, filename: spec.record.filename, ocrConfidence: spec.record.ocrConfidence, summaryText: spec.summaryText || '', notes: spec.notes || [] },
+      header: { partyId: '', partyKind: '', counterparty: '', address: '', accountNumber: '', bankName: '', taxId: '', email: '', department: '', costCenter: '',
+        documentDate: today(), purpose: '', preparedBy: spec.record.uploadedBy || '', receiptsAttached: false, ...spec.header },
+      refs: { purchaseRequest: '', purchaseOrder: '', receipt: '', invoice: '', quotation: '', quotationWaiver: '', ...spec.refs },
+      lines: spec.lines.map(l => ({ id: uid('ln'), statedAmount: null, wht: '', vat: '', ...l })),
+      approvals: [], review: emptyReview(), rejection: null, billId: null,
+    };
+    state.documents[d.id] = d;
+    return d;
+  }
+
+  function policyRefsFor(d, a) {
+    const ids = new Set(['FIN-POL-001', 'FIN-POL-002', 'RAG-CTRL-001', 'EVENT-LIFECYCLE-001', 'COA-001']);
+    const sd = d.sourceDocument;
+    if (['Purchase Order', 'Vendor Invoice', 'Quote'].includes(sd)) ['PROC-POL-001', 'PROC-CTRL-001'].forEach(x => ids.add(x));
+    if (sd === 'Expense Claim') ['EXP-POL-001', 'EXP-POL-002', 'EXP-EVT-001'].forEach(x => ids.add(x));
+    if (sd === 'Payment Voucher') ids.add('AP-EVT-002');
+    if (sd === 'Vendor Invoice') ids.add('AP-EVT-001');
+    if (a.lines.some(l => l.figs.tax.vat)) ids.add('TAX-EVT-001');
+    if (a.lines.some(l => l.figs.tax.wht)) ids.add('TAX-EVT-002');
+    return [...ids].filter(id => chunks[id]).map(id => ({ id, title: chunks[id].title }));
+  }
 
   const view = d => {
     const a = assess(d, master.rows, { today: today() });
     return {
-      id: d.id, number: d.number, sourceDocument: d.sourceDocument, status: d.status, uploadId: d.uploadId,
-      sourceLine: d.sourceLine, header: d.header, refs: d.refs, approvals: d.approvals, review: d.review,
-      rejection: d.rejection, billId: d.billId, createdAt: d.createdAt,
+      id: d.id, number: d.number, sourceDocument: d.sourceDocument, status: d.status, origin: d.origin, company: policy.COMPANY,
+      header: d.header, refs: d.refs, approvals: d.approvals, review: d.review, rejection: d.rejection, billId: d.billId, createdAt: d.createdAt,
       lines: a.lines.map(l => ({
-        id: l.id, rowIndex: l.rowIndex, confidence: l.confidence, description: l.description,
+        id: l.id, rowIndex: l.rowIndex, confidence: l.confidence, description: l.description, evidence: l.evidence, figureSource: l.figureSource, statedAmount: l.statedAmount,
         quantity: l.quantity, unitPrice: l.unitPrice, vat: l.vat, wht: l.wht,
-        event: l.row.financialEvent, phrase: l.row.phrase, journalEntry: l.row.journalEntry,
-        debitAccount: l.row.debitAccount, creditAccount: l.row.creditAccount, glPosting: l.row.glPosting,
-        statementImpact: l.row.statementImpact, figures: l.figs, journal: l.journal,
+        event: l.row.financialEvent, phrase: l.row.phrase, journalEntry: l.row.journalEntry, debitAccount: l.row.debitAccount, creditAccount: l.row.creditAccount,
+        glPosting: l.row.glPosting, statementImpact: l.row.statementImpact, figures: l.figs, journal: l.journal,
       })),
-      events: master.rows.filter(r => r.sourceDocument === d.sourceDocument)
-        .map(r => ({ rowIndex: r.index, event: r.financialEvent, phrase: r.phrase, journalEntry: r.journalEntry })),
+      events: master.rows.filter(r => r.sourceDocument === d.sourceDocument).map(r => ({ rowIndex: r.index, event: r.financialEvent, phrase: r.phrase, journalEntry: r.journalEntry })),
       totals: a.totals, journal: a.journal, balanced: a.balanced, tier: a.tier,
       requiredApprovals: a.requiredApprovals.map(r => ({ ...r, approval: d.approvals.find(x => x.role === r.role) || null })),
       accountsNeedingCode: a.accountsNeedingCode, issues: a.issues,
@@ -48,134 +86,174 @@ function createService({ master, chunks = {}, now = () => new Date() }) {
     };
   };
 
-  function policyRefsFor(d, a) {
-    const ids = new Set(['FIN-POL-001', 'FIN-POL-002', 'RAG-CTRL-001', 'EVENT-LIFECYCLE-001']);
-    if (['Purchase Order', 'Vendor Invoice'].includes(d.sourceDocument)) ['PROC-POL-001', 'PROC-CTRL-001'].forEach(x => ids.add(x));
-    if (d.sourceDocument === 'Expense Claim') ['EXP-POL-001', 'EXP-POL-002', 'EXP-EVT-001'].forEach(x => ids.add(x));
-    if (d.sourceDocument === 'Payment Voucher') ids.add('AP-EVT-002');
-    if (d.sourceDocument === 'Vendor Invoice') ids.add('AP-EVT-001');
-    if (a.totals.vat > 0 || a.lines.some(l => l.figs.tax.vat)) ids.add('TAX-EVT-001');
-    if (a.lines.some(l => l.figs.tax.wht)) ids.add('TAX-EVT-002');
-    ids.add('COA-001');
-    return [...ids].filter(id => chunks[id]).map(id => ({ id, title: chunks[id].title }));
-  }
-
   const summary = d => {
     const v = view(d);
     return {
-      id: d.id, number: d.number, sourceDocument: d.sourceDocument, status: d.status,
-      counterparty: d.header.counterparty, description: d.sourceLine.text, gross: v.totals.gross,
-      lines: v.lines.length, events: [...new Set(v.lines.map(l => l.event))], billId: d.billId, createdAt: d.createdAt,
+      id: d.id, number: d.number, sourceDocument: d.sourceDocument, status: d.status, intake: d.origin.intake, recordId: d.origin.recordId, filename: d.origin.filename,
+      counterparty: d.header.counterparty, description: d.header.purpose, gross: v.totals.gross, lines: v.lines.length,
+      events: [...new Set(v.lines.map(l => l.event))], billId: d.billId, createdAt: d.createdAt,
     };
   };
 
+  function applyParty(d, p) {
+    d.header.partyId = p.id; d.header.partyKind = p.kind; d.header.counterparty = p.name;
+    for (const k of ['address', 'accountNumber', 'bankName', 'taxId', 'email']) d.header[k] = p[k] || '';
+    if (p.department) d.header.department = p.department;
+    if (p.costCenter) d.header.costCenter = p.costCenter;
+  }
+
+  /* ------------------------------- records ------------------------------ */
+  const recordSummary = r => ({
+    id: r.id, filename: r.filename, mime: r.mime, size: r.size, intake: r.intake, docType: r.docType, uploadedBy: r.uploadedBy, uploadedAt: r.uploadedAt,
+    status: r.status, error: r.error, method: r.method, ocrConfidence: r.ocrConfidence, documentIds: r.documentIds, note: r.note,
+  });
+  const readBuffer = r => (store.persistent ? store.readFile(r.file) : buffers.get(r.id));
+
+  async function runProcessing(r) {
+    r.status = 'processing'; r.error = null; persist();
+    try {
+      const ex = await extractDocument(readBuffer(r), r.filename);
+      r.lines = ex.lines; r.method = ex.method; r.ocrConfidence = ex.ocrConfidence;
+      if (!ex.lines.length) throw new HttpError(422, 'No text could be extracted from this document.');
+      const ctx = { master, parties: state.parties, makeDocument, today };
+      const res = r.intake === 'structured' ? processStructured(ctx, r) : processUnstructured(ctx, r);
+      r.summary = res.summary; r.structured = res.structured || null; r.documentIds = res.documentIds; r.note = res.note || null;
+      r.status = 'processed';
+    } catch (e) {
+      r.status = 'failed'; r.error = e.message;
+    }
+    persist();
+    return r;
+  }
+
   const svc = {
     HttpError,
-    sourceDocuments: () => master.sourceDocuments.map(name => ({
-      name, events: master.rows.filter(r => r.sourceDocument === name).length,
-    })),
+    config: () => ({
+      company: policy.COMPANY,
+      structuredTypes: Object.entries(STRUCTURED_TYPES).map(([key, t]) => ({ key, label: t.label, sourceDocument: t.sourceDocument })),
+      sourceDocuments: master.sourceDocuments,
+    }),
 
-    createUpload(filename, lines) {
-      const up = { id: uid('upl'), filename, uploadedAt: now().toISOString(), lines };
-      uploads.set(up.id, up);
-      return up;
+    /** Stores the upload as a record immediately; call processRecord() to run the pipeline. */
+    createRecord({ buffer, filename, intake, docType, uploadedBy }) {
+      if (!['structured', 'unstructured'].includes(intake)) throw new HttpError(400, 'Choose the document type: structured or unstructured');
+      if (intake === 'structured' && docType && docType !== 'auto' && !STRUCTURED_TYPES[docType]) throw new HttpError(400, 'Unknown structured document type');
+      const id = uid('rec');
+      const ext = path.extname(filename).toLowerCase();
+      const r = {
+        id, filename, mime: mimeFor(filename), size: buffer.length, intake, docType: intake === 'structured' ? (docType || 'auto') : null, uploadedBy: str(uploadedBy),
+        uploadedAt: now().toISOString(), status: 'stored', error: null, method: null, ocrConfidence: null, lines: [], summary: null, structured: null, documentIds: [], note: null,
+        file: `${id}${ext}`,
+      };
+      if (store.persistent) store.writeFile(r.file, buffer); else buffers.set(id, buffer);
+      state.records[id] = r; persist();
+      return recordSummary(r);
     },
-    getUpload: id => mustGet(uploads, id, 'Upload'),
-
-    previewMatches(uploadId, sourceDocument) {
-      const up = mustGet(uploads, uploadId, 'Upload');
-      if (!master.sourceDocuments.includes(sourceDocument)) throw new HttpError(400, `Unknown source document "${sourceDocument}"`);
-      const events = master.rows.filter(r => r.sourceDocument === sourceDocument)
-        .map(r => ({ rowIndex: r.index, event: r.financialEvent, phrase: r.phrase }));
-      const matches = matchLines(up.lines, master.rows, sourceDocument).map(m => ({
-        lineNo: m.lineNo, text: m.text, matched: m.matched,
-        candidates: m.candidates.map(c => ({ rowIndex: c.row.index, event: c.row.financialEvent, phrase: c.row.phrase, score: c.score })),
-      }));
-      return { sourceDocument, events, matches };
+    processRecord: id => runProcessing(mustGet('records', id, 'Record')).then(recordSummary),
+    getRecord(id) {
+      const r = mustGet('records', id, 'Record');
+      return { ...recordSummary(r), lines: r.lines, summary: r.summary, structured: r.structured, documents: r.documentIds.filter(x => state.documents[x]).map(x => summary(state.documents[x])) };
     },
-
-    /** items: [{lineNo, rowIndex?}] — rowIndex overrides the best automatic match. */
-    generate(uploadId, sourceDocument, items) {
-      const up = mustGet(uploads, uploadId, 'Upload');
-      if (!master.sourceDocuments.includes(sourceDocument)) throw new HttpError(400, `Unknown source document "${sourceDocument}"`);
-      if (!Array.isArray(items) || !items.length) throw new HttpError(400, 'Select at least one line item');
-      const auto = new Map(matchLines(up.lines, master.rows, sourceDocument).map(m => [m.lineNo, m]));
-      const created = [], skipped = [];
-      for (const it of items) {
-        const line = up.lines.find(l => l.n === Number(it.lineNo));
-        if (!line) { skipped.push({ lineNo: it.lineNo, reason: 'Line not found' }); continue; }
-        let rowIndex, confidence;
-        if (it.rowIndex != null && it.rowIndex !== '') {
-          const row = master.rows[Number(it.rowIndex)];
-          if (!row || row.sourceDocument !== sourceDocument) { skipped.push({ lineNo: line.n, reason: 'Event does not belong to this source document' }); continue; }
-          rowIndex = row.index;
-          const cand = auto.get(line.n).candidates.find(c => c.row.index === rowIndex);
-          confidence = cand ? cand.score : 0; // manual pick without textual evidence -> low confidence, forces review ack
-        } else {
-          const m = auto.get(line.n);
-          if (!m.matched) { skipped.push({ lineNo: line.n, reason: 'No Financial Event / High Frequency Phrase match' }); continue; }
-          rowIndex = m.best.row.index; confidence = m.best.score;
-        }
-        const prefix = PREFIX[sourceDocument] || sourceDocument.split(/\s+/).map(w => w[0]).join('').toUpperCase();
-        const d = {
-          id: uid('doc'), number: `${prefix}-${year()}-${String(++docSeq).padStart(5, '0')}`,
-          sourceDocument, uploadId, sourceLine: { n: line.n, text: line.text }, status: 'draft', createdAt: now().toISOString(),
-          header: { counterparty: '', department: '', costCenter: '', documentDate: today(), purpose: line.text, preparedBy: '', receiptsAttached: false },
-          refs: { purchaseRequest: '', purchaseOrder: '', receipt: '', invoice: '', quotation: '', quotationWaiver: '' },
-          lines: [{ id: uid('ln'), rowIndex, confidence, description: line.text, quantity: '', unitPrice: '', vat: '', wht: '' }],
-          approvals: [], review: { threeWay: {}, vendorChecks: {}, ackLowConfidence: false, accountOverrides: {}, by: null, at: null },
-          rejection: null, billId: null,
-        };
-        docs.set(d.id, d);
-        created.push(summary(d));
-      }
-      return { created, skipped };
+    listRecords: () => Object.values(state.records).map(r => ({ ...recordSummary(r), documents: r.documentIds.length })).reverse(),
+    recordFile(id) {
+      const r = mustGet('records', id, 'Record');
+      return { filename: r.filename, mime: r.mime, path: store.persistent ? store.filePath(r.file) : null, buffer: store.persistent ? null : buffers.get(id) };
+    },
+    async recordPreview(id) {
+      const r = mustGet('records', id, 'Record');
+      const url = `/api/records/${id}/file`;
+      if (r.mime.startsWith('image/')) return { kind: 'image', url };
+      if (r.mime === 'application/pdf') return { kind: 'pdf', url };
+      if (r.filename.toLowerCase().endsWith('.docx')) return { kind: 'html', html: await docxHtml(readBuffer(r)) };
+      return { kind: 'text', text: readBuffer(r).toString('utf8') };
+    },
+    async reprocessRecord(id) {
+      const r = mustGet('records', id, 'Record');
+      if (r.status === 'processing') throw new HttpError(409, 'Record is still processing');
+      const existing = r.documentIds.map(x => state.documents[x]).filter(Boolean);
+      if (existing.some(d => d.status !== 'draft')) throw new HttpError(409, 'Documents from this record are already in approval; reprocessing would discard that work');
+      existing.forEach(d => delete state.documents[d.id]);
+      r.documentIds = []; r.summary = null; r.structured = null; r.note = null;
+      return recordSummary(await runProcessing(r));
     },
 
-    listDocuments: () => [...docs.values()].map(summary),
-    getDocument: id => view(mustGet(docs, id, 'Document')),
+    /* ------------------------------ parties ------------------------------ */
+    listParties: kind => state.parties.filter(p => !kind || p.kind === kind),
+    createParty(body) {
+      if (!KINDS.includes(body.kind)) throw new HttpError(400, 'kind must be employee, vendor or customer');
+      if (!str(body.name)) throw new HttpError(400, 'Name is required');
+      const prefix = { employee: 'EMP', vendor: 'VEN', customer: 'CUS' }[body.kind];
+      const n = state.parties.filter(p => p.kind === body.kind).length + 1;
+      const p = { id: `${prefix}-${String(n).padStart(3, '0')}`, kind: body.kind, aliases: [] };
+      for (const k of PARTY_FIELDS) p[k] = str(body[k]);
+      state.parties.push(p); persist();
+      return p;
+    },
+    updateParty(id, body) {
+      const p = state.parties.find(x => x.id === id);
+      if (!p) throw new HttpError(404, 'Party not found');
+      for (const k of PARTY_FIELDS) if (k in body) p[k] = str(body[k]);
+      if (!p.name) throw new HttpError(400, 'Name is required');
+      persist(); return p;
+    },
+
+    /* ----------------------------- documents ----------------------------- */
+    listDocuments: () => docs().map(summary).reverse(),
+    getDocument: id => view(mustGet('documents', id, 'Document')),
 
     update(id, patch) {
-      const d = mustGet(docs, id, 'Document');
+      const d = mustGet('documents', id, 'Document');
       if (d.status !== 'draft') throw new HttpError(409, 'Only draft documents can be edited');
-      if (patch.header) for (const k of Object.keys(d.header)) if (k in patch.header) d.header[k] = k === 'receiptsAttached' ? !!patch.header[k] : str(patch.header[k]);
+      if (patch.header) {
+        const h = patch.header;
+        if ('partyId' in h && str(h.partyId) !== d.header.partyId) {
+          if (str(h.partyId)) { const p = state.parties.find(x => x.id === h.partyId); if (!p) throw new HttpError(400, 'Party not found'); applyParty(d, p); }
+          else { d.header.partyId = ''; d.header.partyKind = ''; }
+        }
+        for (const k of HEADER_KEYS) if (k in h && k !== 'partyId' && k !== 'partyKind') d.header[k] = str(h[k]);
+        if ('receiptsAttached' in h) d.header.receiptsAttached = !!h.receiptsAttached;
+      }
       if (patch.refs) for (const k of Object.keys(d.refs)) if (k in patch.refs) d.refs[k] = str(patch.refs[k]);
       if (Array.isArray(patch.lines)) {
-        const next = patch.lines.map(l => {
+        d.lines = patch.lines.map(l => {
           const old = d.lines.find(x => x.id === l.id);
-          let rowIndex = old ? old.rowIndex : undefined;
-          let confidence = old ? old.confidence : 0;
+          let rowIndex = old ? old.rowIndex : undefined, confidence = old ? old.confidence : 0;
           if (l.rowIndex != null && (!old || Number(l.rowIndex) !== old.rowIndex)) {
             const row = master.rows[Number(l.rowIndex)];
             if (!row || row.sourceDocument !== d.sourceDocument) throw new HttpError(400, 'Event does not belong to this source document');
             rowIndex = row.index;
-            const cand = matchLines([{ n: 0, text: d.sourceLine.text }], master.rows, d.sourceDocument)[0].candidates.find(c => c.row.index === rowIndex);
+            const text = l.description || (old && old.description) || '';
+            const cand = matchLines([{ n: 0, text }], master.rows, d.sourceDocument)[0].candidates.find(c => c.row.index === rowIndex);
             confidence = cand ? cand.score : 0;
           }
           if (rowIndex == null) throw new HttpError(400, 'Line needs a financial event');
-          return {
+          const next = {
             id: old ? old.id : uid('ln'), rowIndex, confidence, description: l.description == null ? (old ? old.description : '') : str(l.description),
+            evidence: old ? old.evidence : '', statedAmount: old ? old.statedAmount : null, figureSource: old ? old.figureSource : 'user',
             quantity: str(l.quantity), unitPrice: str(l.unitPrice), vat: str(l.vat), wht: str(l.wht),
           };
+          if (old && ['quantity', 'unitPrice', 'vat', 'wht'].some(k => next[k] !== old[k])) next.figureSource = 'user';
+          return next;
         });
-        d.lines = next;
       }
+      if (patch.confirmFigures) d.lines.forEach(l => { if (l.figureSource === 'fictitious') l.figureSource = 'confirmed'; });
+      persist();
       return view(d);
     },
 
     submit(id, by) {
-      const d = mustGet(docs, id, 'Document');
+      const d = mustGet('documents', id, 'Document');
       if (d.status !== 'draft') throw new HttpError(409, `Document is ${d.status}`);
       if (!str(by)) throw new HttpError(400, 'Preparer name is required');
       d.header.preparedBy = str(by);
       const errs = assess(d, master.rows, { today: today() }).issues.submit.filter(i => i.level === 'error');
       if (errs.length) throw new HttpError(422, 'Document is not ready for approval', errs);
-      d.status = 'pending_approval'; d.rejection = null;
+      d.status = 'pending_approval'; d.rejection = null; persist();
       return view(d);
     },
 
     approve(id, role, by) {
-      const d = mustGet(docs, id, 'Document');
+      const d = mustGet('documents', id, 'Document');
       if (d.status !== 'pending_approval') throw new HttpError(409, `Document is ${d.status}`);
       const a = assess(d, master.rows, { today: today() });
       if (!a.requiredApprovals.some(r => r.role === role)) throw new HttpError(400, `${role} is not a required approver`);
@@ -184,22 +262,24 @@ function createService({ master, chunks = {}, now = () => new Date() }) {
       if (err) throw new HttpError(403, err);
       d.approvals.push({ role, by: str(by), at: now().toISOString() });
       if (a.requiredApprovals.every(r => d.approvals.some(x => x.role === r.role))) d.status = 'approved';
+      persist();
       return view(d);
     },
 
     reject(id, by, reason) {
-      const d = mustGet(docs, id, 'Document');
-      if (!['pending_approval', 'approved', 'reviewed'].includes(d.status)) throw new HttpError(409, `Document is ${d.status}`);
+      const d = mustGet('documents', id, 'Document');
+      if (!['pending_approval', 'approved'].includes(d.status)) throw new HttpError(409, `Document is ${d.status}`);
       if (!str(by) || !str(reason)) throw new HttpError(400, 'Name and reason are required');
-      d.status = 'draft'; d.approvals = [];
-      d.review = { threeWay: {}, vendorChecks: {}, ackLowConfidence: false, accountOverrides: {}, by: null, at: null };
+      d.status = 'draft'; d.approvals = []; d.review = emptyReview();
       d.rejection = { by: str(by), reason: str(reason), at: now().toISOString() };
+      persist();
       return view(d);
     },
 
+    /** Final approval step. On success the document becomes a bill, ready for payment. */
     financeReview(id, { by, threeWay, vendorChecks, ackLowConfidence, accountOverrides } = {}) {
-      const d = mustGet(docs, id, 'Document');
-      if (d.status !== 'approved') throw new HttpError(409, `Document is ${d.status}; Finance Review follows approval`);
+      const d = mustGet('documents', id, 'Document');
+      if (d.status !== 'approved') throw new HttpError(409, `Document is ${d.status}; Finance Review follows the approvals`);
       const err = segregationError(d, by, 'Finance Reviewer');
       if (err) throw new HttpError(403, err);
       const ov = {};
@@ -208,53 +288,39 @@ function createService({ master, chunks = {}, now = () => new Date() }) {
       const draft = { ...d, review: { threeWay: threeWay || {}, vendorChecks: vendorChecks || {}, ackLowConfidence: !!ackLowConfidence, accountOverrides: ov, by: null, at: null } };
       const errs = assess(draft, master.rows, { today: today() }).issues.review.filter(i => i.level === 'error');
       d.review = draft.review;
-      if (errs.length) throw new HttpError(422, 'Finance review incomplete', errs);
-      d.review.by = str(by); d.review.at = now().toISOString(); d.status = 'reviewed';
+      if (errs.length) { persist(); throw new HttpError(422, 'Finance review incomplete', errs); }
+      d.review.by = str(by); d.review.at = now().toISOString();
+      const bill = makeBill(d);
+      d.status = 'billed'; d.billId = bill.id; persist();
       return view(d);
     },
 
-    convertToBill(id, by) {
-      const d = mustGet(docs, id, 'Document');
-      if (d.status !== 'reviewed') throw new HttpError(409, `Document is ${d.status}; it must be finance-reviewed before conversion`);
+    /* -------------------------------- bills ------------------------------- */
+    listBills: () => Object.values(state.bills).map(b => ({
+      id: b.id, number: b.number, documentNumber: b.documentNumber, sourceDocument: b.sourceDocument, counterparty: b.counterparty,
+      gross: b.totals.gross, payable: b.totals.payable, glPosting: b.glPosting, paymentStatus: b.paymentStatus, amountDue: b.amountDue, createdAt: b.createdAt, intake: b.origin.intake,
+    })).reverse(),
+    getBill: id => mustGet('bills', id, 'Bill'),
+
+    payBill(id, by) {
+      const b = mustGet('bills', id, 'Bill');
+      if (b.paymentStatus !== 'awaiting_payment') throw new HttpError(409, b.paymentStatus === 'paid' ? 'Bill is already paid' : 'This bill does not require payment');
+      const d = state.documents[b.documentId];
       const err = segregationError(d, by, 'Payment Processor');
       if (err) throw new HttpError(403, err);
-      const a = assess(d, master.rows, { today: today() });
-      const missing = a.requiredApprovals.filter(r => !d.approvals.some(x => x.role === r.role));
-      if (missing.length) throw new HttpError(422, 'Mandatory approvals are incomplete', missing.map(m => ({ level: 'error', msg: `${m.role} approval missing`, ref: 'FIN-POL-001' })));
-      if (!a.balanced) throw new HttpError(422, 'Journal does not balance');
-      // aggregate identical account/side lines for the posted entry
-      const agg = new Map();
-      for (const j of a.journal) {
-        const k = `${j.side}|${j.account}`;
-        const cur = agg.get(k) || { side: j.side, account: j.account, code: j.code, memo: j.memo, amount: 0 };
-        cur.amount = Math.round((cur.amount + j.amount) * 100) / 100; agg.set(k, cur);
-      }
-      const entries = [...agg.values()].sort((x, y) => (x.side === y.side ? 0 : x.side === 'Dr' ? -1 : 1));
-      const bill = {
-        id: uid('bill'), number: `BILL-${year()}-${String(++billSeq).padStart(5, '0')}`,
-        documentId: d.id, documentNumber: d.number, sourceDocument: d.sourceDocument,
-        counterparty: d.header.counterparty, department: d.header.department, costCenter: d.header.costCenter,
-        documentDate: d.header.documentDate, purpose: d.header.purpose, currency: 'NGN', refs: d.refs,
-        totals: a.totals, entries, glPosting: entries.length ? 'Ready to post' : 'No GL posting (commitment only)',
-        lines: a.lines.map(l => ({ event: l.row.financialEvent, phrase: l.row.phrase, description: l.description, glPosting: l.row.glPosting, figures: l.figs, confidence: l.confidence })),
-        workflow: {
-          preparedBy: d.header.preparedBy, approvals: d.approvals, financeReviewer: d.review.by, financeReviewedAt: d.review.at,
-          paymentProcessor: str(by), convertedAt: now().toISOString(),
-        },
-        policyRefs: view(d).policyRefs, status: 'billed',
-      };
-      bills.set(bill.id, bill);
-      d.status = 'billed'; d.billId = bill.id;
-      return bill;
+      if (!str(d.header.accountNumber)) throw new HttpError(422, 'Beneficiary bank account is missing — update the party record and the document before paying', [{ level: 'error', msg: 'Beneficiary bank account is required for payment', ref: 'AP-EVT-002' }]);
+      const payables = b.entries.filter(e => e.side === 'Cr' && PAYABLE_ACCOUNTS.includes(e.account));
+      const entries = [
+        ...payables.map(e => ({ side: 'Dr', account: e.account, code: e.code, memo: false, amount: e.amount })),
+        { side: 'Cr', account: 'Bank', code: 1100, memo: false, amount: Math.round(payables.reduce((s, e) => s + e.amount, 0) * 100) / 100 },
+      ];
+      b.payment = { by: str(by), at: now().toISOString(), entries, reference: `PAY-${b.number.slice(5)}`, beneficiary: { name: d.header.counterparty, accountNumber: d.header.accountNumber, bankName: d.header.bankName } };
+      b.paymentStatus = 'paid'; persist();
+      return b;
     },
 
-    listBills: () => [...bills.values()].map(b => ({
-      id: b.id, number: b.number, documentNumber: b.documentNumber, sourceDocument: b.sourceDocument,
-      counterparty: b.counterparty, gross: b.totals.gross, payable: b.totals.payable, glPosting: b.glPosting, convertedAt: b.workflow.convertedAt,
-    })),
-    getBill: id => mustGet(bills, id, 'Bill'),
     billCsv(id) {
-      const b = mustGet(bills, id, 'Bill');
+      const b = mustGet('bills', id, 'Bill');
       return toCsv([
         ['Bill', b.number], ['Source document', b.documentNumber], ['Counterparty', b.counterparty], ['Date', b.documentDate], [],
         ['Side', 'Account code', 'Account', 'Amount (NGN)'],
@@ -264,6 +330,36 @@ function createService({ master, chunks = {}, now = () => new Date() }) {
     policyChunk: id => chunks[id] || null,
     policyChunks: () => Object.values(chunks).map(({ id, title }) => ({ id, title })),
   };
+
+  function makeBill(d) {
+    const a = assess(d, master.rows, { today: today() });
+    const missing = a.requiredApprovals.filter(r => !d.approvals.some(x => x.role === r.role));
+    if (missing.length) throw new HttpError(422, 'Mandatory approvals are incomplete', missing.map(m => ({ level: 'error', msg: `${m.role} approval missing`, ref: 'FIN-POL-001' })));
+    if (!a.balanced) throw new HttpError(422, 'Journal does not balance');
+    const agg = new Map();
+    for (const j of a.journal) {
+      const k = `${j.side}|${j.account}`;
+      const cur = agg.get(k) || { side: j.side, account: j.account, code: j.code, memo: j.memo, amount: 0 };
+      cur.amount = Math.round((cur.amount + j.amount) * 100) / 100; agg.set(k, cur);
+    }
+    const entries = [...agg.values()].sort((x, y) => (x.side === y.side ? 0 : x.side === 'Dr' ? -1 : 1));
+    const amountDue = Math.round(entries.filter(e => e.side === 'Cr' && PAYABLE_ACCOUNTS.includes(e.account)).reduce((s, e) => s + e.amount, 0) * 100) / 100;
+    const bill = {
+      id: uid('bill'), number: `BILL-${year()}-${String(++state.seq.bill).padStart(5, '0')}`, createdAt: now().toISOString(),
+      documentId: d.id, documentNumber: d.number, sourceDocument: d.sourceDocument, origin: d.origin,
+      counterparty: d.header.counterparty, address: d.header.address, accountNumber: d.header.accountNumber, bankName: d.header.bankName,
+      department: d.header.department, costCenter: d.header.costCenter, documentDate: d.header.documentDate, purpose: d.header.purpose, currency: 'NGN', refs: d.refs,
+      totals: a.totals, entries, glPosting: entries.length ? 'Ready to post' : 'No GL posting (commitment / register only)',
+      lines: a.lines.map(l => ({ event: l.row.financialEvent, phrase: l.row.phrase, description: l.description, glPosting: l.row.glPosting, figures: l.figs, confidence: l.confidence })),
+      workflow: { preparedBy: d.header.preparedBy, approvals: d.approvals, financeReviewer: d.review.by, financeReviewedAt: d.review.at },
+      policyRefs: policyRefsFor(d, a), status: 'billed',
+      paymentStatus: amountDue > 0 ? 'awaiting_payment' : 'no_payment', amountDue, payment: null,
+    };
+    state.bills[bill.id] = bill;
+    return bill;
+  }
+
+  persist();
   return svc;
 }
 

@@ -3,9 +3,18 @@ const fs = require('fs');
 const path = require('path');
 const { parseCsvObjects } = require('./csv');
 
-function loadMasterData(file = path.join(__dirname, '..', 'data', 'Financial_Master_Data.csv')) {
-  const rows = parseCsvObjects(fs.readFileSync(file, 'utf8')).map((r, index) => ({
+const DATA = path.join(__dirname, '..', 'data');
+
+/**
+ * Financial_Master_Data.csv is the business-owned file. Rows for document types it does not
+ * cover (e.g. Quote) live in Supplemental_Financial_Events.csv so the original stays untouched.
+ */
+function loadMasterData(file = path.join(DATA, 'Financial_Master_Data.csv'), supplemental = path.join(DATA, 'Supplemental_Financial_Events.csv')) {
+  const raw = parseCsvObjects(fs.readFileSync(file, 'utf8'));
+  const extra = supplemental && fs.existsSync(supplemental) ? parseCsvObjects(fs.readFileSync(supplemental, 'utf8')) : [];
+  const rows = [...raw, ...extra].map((r, index) => ({
     index,
+    supplemental: index >= raw.length,
     sourceDocument: r['Source Document'],
     financialEvent: r['Financial Event'],
     accountingImpact: r['Accounting Impact'],
