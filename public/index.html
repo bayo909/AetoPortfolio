@@ -9,12 +9,13 @@
 </head>
 <body>
 <header class="top">
-  <div class="brand">DocFlow <span>unstructured document &rarr; source document &rarr; bill</span></div>
+  <div class="brand">DocFlow <span>upload &rarr; process &rarr; billing &rarr; payment</span></div>
   <nav id="tabs">
-    <button data-tab="upload">1 &middot; Upload</button>
-    <button data-tab="match">2 &middot; Source documents</button>
-    <button data-tab="process">3 &middot; Payment processing <b id="docCount" class="count"></b></button>
+    <button data-tab="upload">Upload</button>
+    <button data-tab="records">Records <b id="recCount" class="count"></b></button>
+    <button data-tab="billing">Billing <b id="docCount" class="count"></b></button>
     <button data-tab="bills">Bills <b id="billCount" class="count"></b></button>
+    <button data-tab="parties">Parties</button>
   </nav>
 </header>
 <main id="view"></main>
