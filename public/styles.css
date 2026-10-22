@@ -15,7 +15,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:6px 8px;
 th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
 td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
 input,select,textarea,button{font:inherit;color:inherit}
-input[type=text],input[type=date],input[type=number],select{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%}
+input[type=text],input[type=password],input[type=date],input[type=number],select{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%}
 input:disabled,select:disabled{background:var(--bg);color:var(--muted)}
 label{display:block;font-size:12px;color:var(--muted);margin-bottom:2px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
@@ -72,3 +72,7 @@ dialog pre{white-space:pre-wrap;font:13px/1.5 system-ui;max-height:55vh;overflow
 textarea{width:100%;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
 .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
 .tag{font-size:11px;color:var(--muted)}
+
+#user{display:flex;gap:10px;align-items:center}.who{display:flex;flex-direction:column;line-height:1.2;text-align:right}.who small{color:var(--muted)}
+code{background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:1px 6px;font-family:ui-monospace,Menlo,monospace}
+[hidden]{display:none!important}

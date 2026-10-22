@@ -6,7 +6,7 @@ const STATUS = { draft: ['Draft · corrections', ''], pending_approval: ['Pendin
 const REC_STATUS = { stored: ['Stored', ''], processing: ['Processing…', 'warn'], processed: ['Processed', 'ok'], failed: ['Failed', 'err'] };
 const store = { get: k => { try { return localStorage.getItem(k) || ''; } catch { return ''; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } } };
 
-const S = { tab: 'upload', config: null, intake: 'structured', docType: 'auto', records: [], docs: [], bills: [], parties: [], recordId: null, current: null, currentId: null, bill: null, showOriginal: false, billFilter: 'all' };
+const S = { me: null, tab: 'upload', config: null, intake: 'structured', docType: 'auto', records: [], docs: [], bills: [], parties: [], recordId: null, current: null, currentId: null, bill: null, showOriginal: false, billFilter: 'all' };
 
 async function api(path, opts = {}) {
   const init = { method: opts.method || 'GET', headers: {} };
@@ -14,16 +14,21 @@ async function api(path, opts = {}) {
   else if (opts.body) { init.body = JSON.stringify(opts.body); init.headers['Content-Type'] = 'application/json'; }
   const res = await fetch('/api' + path, init);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { issues: data.issues });
+  if (!res.ok) {
+    if (res.status === 401 && !path.startsWith('/auth/')) { S.me = null; viewLogin('Your session has ended. Please sign in again.'); }
+    throw Object.assign(new Error(data.error || res.statusText), { issues: data.issues, status: res.status });
+  }
   return data;
 }
+const isVendor = () => S.me && S.me.role === 'vendor';
+const hasRole = r => S.me && S.me.role === 'buyer' && (S.me.approvalRoles || []).includes(r);
 function toast(msg, issues, good) {
   const t = $('#toast');
   t.className = good ? 'good' : '';
   t.innerHTML = esc(msg) + (issues && issues.length ? '<ul>' + issues.map(i => `<li>${esc(i.msg || i)}</li>`).join('') + '</ul>' : '');
   t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => (t.hidden = true), good ? 2500 : 9000);
 }
-const guard = fn => async (...a) => { try { await fn(...a); } catch (e) { toast(e.message, e.issues); } };
+const guard = fn => async (...a) => { try { await fn(...a); } catch (e) { if (e.status !== 401) toast(e.message, e.issues); } };
 const pill = (text, cls = '') => `<span class="pill ${cls}">${esc(text)}</span>`;
 const intakePill = i => pill(i === 'structured' ? 'Structured' : 'Unstructured', i === 'structured' ? 'brand' : '');
 
@@ -38,7 +43,18 @@ async function refreshLists() {
   $('#billCount').textContent = S.bills.length || '';
 }
 async function openDoc(id) { S.currentId = id; S.current = await api('/documents/' + id); }
+function applyChrome() {
+  const vendor = isVendor();
+  document.querySelectorAll('#tabs button').forEach(b => { b.hidden = !S.me || (vendor && ['billing', 'parties'].includes(b.dataset.tab)); });
+  const label = { records: vendor ? 'My invoices' : 'Records', bills: vendor ? 'My bills' : 'Bills' };
+  document.querySelectorAll('#tabs button').forEach(b => { const t = label[b.dataset.tab]; if (t) b.firstChild.textContent = t + ' '; });
+  $('#user').innerHTML = S.me ? `<span class="who"><b>${esc(S.me.name)}</b><small>${esc(S.me.title)}</small></span><button class="btn sec" id="logout">Sign out</button>` : '';
+  const lo = $('#logout'); if (lo) lo.onclick = async () => { await api('/auth/logout', { method: 'POST' }).catch(() => {}); S.me = null; S.tab = 'upload'; S.current = S.currentId = S.bill = null; viewLogin(); };
+}
 function render() {
+  if (!S.me) return viewLogin();
+  applyChrome();
+  if (isVendor() && ['billing', 'parties'].includes(S.tab)) S.tab = 'upload';
   const active = S.tab === 'record' ? 'records' : S.tab;
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === active));
   ({ upload: viewUpload, records: viewRecords, record: viewRecord, billing: viewBilling, bills: viewBills, parties: viewParties })[S.tab]();
@@ -51,31 +67,32 @@ const wirePolicy = root => root.querySelectorAll('[data-policy]').forEach(a => {
 
 /* ------------------------------- Upload -------------------------------- */
 function viewUpload() {
-  const types = S.config.structuredTypes;
+  const vendor = isVendor();
+  if (vendor) { S.intake = 'structured'; if (!['invoice_payable', 'quote'].includes(S.docType)) S.docType = 'invoice_payable'; }
+  const types = S.config.structuredTypes.filter(t => !vendor || ['invoice_payable', 'quote'].includes(t.key));
   $('#view').innerHTML = `
   <div class="card"><h2>Upload a document</h2>
     <p class="sub">Every upload is stored as a record first, then processed. Choose how it should be processed:</p>
-    <div class="cards">
+    <div class="cards">${isVendor() ? '' : `
       <div class="choice ${S.intake === 'structured' ? 'on' : ''}" data-intake="structured"><h3>Structured</h3><p>Invoices, quotes and receipts. They already are source documents: OCR reads them, the data is posted as structured fields and line items, and they go to Billing.</p></div>
-      <div class="choice ${S.intake === 'unstructured' ? 'on' : ''}" data-intake="unstructured"><h3>Unstructured</h3><p>Approved source documents, proposals, notes and memos. Key financial events are summarised and matched to the Financial Events to generate source documents (employee expenses, vendor payments, admin expenses…) with illustrative figures.</p></div>
+      <div class="choice ${S.intake === 'unstructured' ? 'on' : ''}" data-intake="unstructured"><h3>Unstructured</h3><p>Approved source documents, proposals, notes and memos. Key financial events are summarised and matched to the Financial Events to generate source documents (employee expenses, vendor payments, admin expenses…) with illustrative figures.</p></div>`}
     </div>
     <div class="grid2" style="margin-top:14px">
-      ${S.intake === 'structured' ? `<div><label>Document type</label><select id="docType"><option value="auto">Auto-detect</option>${types.map(t => `<option value="${t.key}" ${S.docType === t.key ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></div>` : ''}
-      <div><label>Uploaded by (your name)</label><input type="text" id="by" value="${esc(store.get('docflow.by'))}" placeholder="e.g. Ada Preparer"></div>
+      ${S.intake === 'structured' ? `<div><label>Document type</label><select id="docType">${vendor ? '' : '<option value="auto">Auto-detect</option>'}${types.map(t => `<option value="${t.key}" ${S.docType === t.key ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></div>` : ''}
+      <div><label>Uploaded by</label><input type="text" value="${esc(S.me.name)}" disabled></div>
     </div>
     <div class="drop" id="drop" style="margin-top:14px"><p>Drag a file here, or choose one (.pdf, .docx, .png, .jpg, .txt)</p>
       <input type="file" id="file" accept=".pdf,.docx,.png,.jpg,.jpeg,.webp,.bmp,.txt,.md,.csv"></div>
     <div class="row" style="margin-top:10px"><span class="hint">Try a sample:</span>
       <button class="btn sec" data-sample="structured|invoice_securetech.png|invoice_payable">Invoice image (structured, OCR)</button>
-      <button class="btn sec" data-sample="structured|invoice_okafor.pdf|auto">Invoice PDF (structured)</button>
-      <button class="btn sec" data-sample="unstructured|memo_admin_expenses.txt|">Memo (unstructured)</button>
-      <button class="btn sec" data-sample="unstructured|proposal_q2_operations.docx|">Proposal .docx (unstructured)</button></div>
+      <button class="btn sec" data-sample="structured|invoice_okafor.pdf|${vendor ? 'invoice_payable' : 'auto'}">Invoice PDF (structured)</button>
+      ${vendor ? '' : `<button class="btn sec" data-sample="unstructured|memo_admin_expenses.txt|">Memo (unstructured)</button>
+      <button class="btn sec" data-sample="unstructured|proposal_q2_operations.docx|">Proposal .docx (unstructured)</button>`}</div>${vendor ? '<p class="hint">Invoices you upload are matched to your own vendor account and sent to the company for processing.</p>' : ''}
   </div>`;
   document.querySelectorAll('[data-intake]').forEach(c => c.onclick = () => { S.intake = c.dataset.intake; viewUpload(); });
   const dt = $('#docType'); if (dt) dt.onchange = () => { S.docType = dt.value; };
   const send = guard(async (file, intake = S.intake, docType = S.docType) => {
-    const by = $('#by').value.trim(); store.set('docflow.by', by);
-    const fd = new FormData(); fd.append('intake', intake); fd.append('uploadedBy', by);
+    const fd = new FormData(); fd.append('intake', intake);
     if (intake === 'structured') fd.append('docType', docType); fd.append('file', file);
     const rec = await api('/records', { method: 'POST', body: fd });
     await refreshLists(); S.recordId = rec.id; go('record');
@@ -141,8 +158,8 @@ async function viewRecord() {
   const busy = r.status === 'stored' || r.status === 'processing';
   $('#view').innerHTML = `
   <div class="card"><div class="row"><h2 class="sp">${esc(r.filename)} ${intakePill(r.intake)} ${pill(st, sc)}</h2>
-    <button class="btn sec" id="reproc" ${busy ? 'disabled' : ''}>Reprocess</button>
-    <button class="btn" id="toBilling" ${r.documents.length ? '' : 'disabled'}>Go to Billing &rarr;</button></div>
+    ${isVendor() ? '' : `<button class="btn sec" id="reproc" ${busy ? 'disabled' : ''}>Reprocess</button>`}
+    ${isVendor() ? '' : `<button class="btn" id="toBilling" ${r.documents.length ? '' : 'disabled'}>Go to Billing &rarr;</button>`}</div>
     <p class="sub">${r.intake === 'structured' ? 'Structured: parsed into fields and line items' : 'Unstructured: summarised, matched to Financial Events, source documents generated'}
       ${r.method ? ` · text read by <b>${r.method === 'ocr' ? 'OCR' : 'direct extraction'}</b>${r.ocrConfidence != null ? ` (confidence ${r.ocrConfidence}%)` : ''}` : ''} · uploaded by ${esc(r.uploadedBy) || '—'}</p></div>
   <div class="split2">
@@ -150,8 +167,8 @@ async function viewRecord() {
     <div class="pane"><h3>Processed document</h3><div class="body" id="outPane"></div></div>
   </div>`;
   previewPane(id).then(h => { const el = $('#srcPane'); if (el) el.innerHTML = h; }).catch(e => { const el = $('#srcPane'); if (el) el.textContent = e.message; });
-  $('#reproc').onclick = guard(async () => { await api(`/records/${id}/reprocess`, { method: 'POST' }); viewRecord(); });
-  $('#toBilling').onclick = guard(async () => { await refreshLists(); await openDoc(r.documents[0].id); go('billing'); });
+  if ($('#reproc')) $('#reproc').onclick = guard(async () => { await api(`/records/${id}/reprocess`, { method: 'POST' }); viewRecord(); });
+  if ($('#toBilling')) $('#toBilling').onclick = guard(async () => { await refreshLists(); await openDoc(r.documents[0].id); go('billing'); });
   const out = $('#outPane');
   if (busy) {
     out.innerHTML = `<p><span class="spin"></span>${r.intake === 'structured' ? 'Reading the document (OCR if needed) and posting structured data…' : 'Extracting text, summarising key financial events and matching Financial Events…'}</p>`;
@@ -174,8 +191,8 @@ async function viewRecord() {
     html += `<h3 style="margin-top:0">Posted as structured data</h3><p class="sub">${esc(s.label || '')}${s.parsed.docNumber ? ' · ' + esc(s.parsed.docNumber) : ''}</p>`;
   }
   if (r.note) html += `<ul class="issues"><li class="warning">${esc(r.note)}</li></ul>`;
-  html += docs.map(d => `${paperDoc(d)}${d.issues.submit.filter(i => i.level === 'warning').slice(0, 4).map(i => `<ul class="issues"><li class="warning">${esc(i.msg)}</li></ul>`).join('')}
-    <div class="row" style="margin-bottom:14px"><button class="btn sec" data-open="${d.id}">Open ${esc(d.number)} in Billing</button></div>`).join('');
+  html += docs.map(d => `${paperDoc(d)}${((d.issues || {}).submit || []).filter(i => i.level === 'warning').slice(0, 4).map(i => `<ul class="issues"><li class="warning">${esc(i.msg)}</li></ul>`).join('')}
+    ${isVendor() ? `<p class="hint">Status: ${esc(STATUS[d.status][0])}${d.billId ? ' — see My bills for payment status.' : ''}</p>` : `<div class="row" style="margin-bottom:14px"><button class="btn sec" data-open="${d.id}">Open ${esc(d.number)} in Billing</button></div>`}`).join('');
   out.innerHTML = html;
   document.querySelectorAll('[data-open]').forEach(b => b.onclick = guard(async () => { await refreshLists(); await openDoc(b.dataset.open); go('billing'); }));
 }
@@ -263,18 +280,18 @@ function journalHtml(d) {
   <table><thead><tr><th>Account</th><th>Code</th><th class="n">Debit</th><th class="n">Credit</th></tr></thead><tbody>
   ${rows.map(j => `<tr><td style="padding-left:${j.side === 'Cr' ? 28 : 8}px">${esc(j.account)}${j.memo ? ' ' + pill('memo') : ''}</td><td class="mono">${j.code ?? pill('needs code', 'warn')}</td><td class="n">${j.side === 'Dr' ? money(j.amount) : ''}</td><td class="n">${j.side === 'Cr' ? money(j.amount) : ''}</td></tr>`).join('')}</tbody></table>`;
 }
-const rejectHtml = () => '<div style="margin-top:12px"><button class="btn sec" id="reject">Return for corrections…</button></div>';
+const rejectHtml = () => (S.me.approvalRoles || []).some(r => r !== 'Preparer') ? '<div style="margin-top:12px"><button class="btn sec" id="reject">Return for corrections…</button></div>' : '';
 
 function workflowHtml(d) {
   if (d.status === 'draft') {
     return `<h2>Corrections &amp; submission</h2><p class="sub">Correct anything the extraction got wrong, then submit for approval.</p>${issueList(d.issues.submit)}
-      <div class="row"><div style="max-width:260px"><label>Prepared by (your name)</label><input type="text" id="prep" value="${esc(d.header.preparedBy || store.get('docflow.by'))}"></div>
-      <button class="btn" id="submit" style="align-self:end">Save &amp; submit for approval</button></div>`;
+      ${hasRole('Preparer') ? `<div class="row"><span class="mut">Submitting as <b>${esc(S.me.name)}</b></span><button class="btn" id="submit">Save &amp; submit for approval</button></div>`
+        : `<p class="hint">Only a login with the Preparer role can submit. You can still make corrections (${esc(S.me.title)}).</p>`}`;
   }
   if (d.status === 'pending_approval') {
     return `<h2>Approvals</h2><p class="sub">Tier for NGN ${money(d.totals.gross)} (FIN-POL-001). Approvers must be different people, and cannot be the preparer or beneficiary.</p>
     <table><tbody>${d.requiredApprovals.map(r => `<tr><td><b>${esc(r.role)}</b><br><small class="mut">${esc(r.reason)}</small></td>
-      <td>${r.approval ? pill('Approved by ' + r.approval.by, 'ok') : `<div class="row"><input type="text" placeholder="Approver name" data-by="${esc(r.role)}" style="max-width:220px"><button class="btn" data-approve="${esc(r.role)}">Approve</button></div>`}</td></tr>`).join('')}</tbody></table>${rejectHtml()}`;
+      <td>${r.approval ? pill('Approved by ' + r.approval.by, 'ok') : hasRole(r.role) ? `<button class="btn" data-approve="${esc(r.role)}">Approve as ${esc(r.role)}</button>` : `<span class="mut">Waiting for ${esc(r.role)}</span>`}</td></tr>`).join('')}</tbody></table>${rejectHtml()}`;
   }
   if (d.status === 'approved') {
     const need = d.accountsNeedingCode;
@@ -285,7 +302,7 @@ function workflowHtml(d) {
       <h3>Vendor verification <a class="chip" data-policy="PROC-POL-001">PROC-POL-001</a></h3><div class="row">${d.checklists.vendor.map(c => `<label style="color:var(--ink)"><input type="checkbox" data-vc="${esc(c)}"> ${esc(c)}</label>`).join('')}</div>` : ''}
     ${hasLow ? '<h3>Low-confidence classification</h3><label style="color:var(--ink)"><input type="checkbox" id="ack"> I confirm the financial event for low-confidence lines is correct <a class="chip" data-policy="RAG-CTRL-001">RAG-CTRL-001</a></label>' : ''}
     ${need.length ? `<h3>Chart of accounts <a class="chip" data-policy="COA-001">COA-001</a></h3><p class="sub">The policy COA has no specific account for these — assign a code in range.</p><div class="grid">${need.map(a => `<div><label>${esc(a.account)} (${a.range.from}–${a.range.to})</label><input type="number" data-ov="${esc(a.account)}" min="${a.range.from}" max="${a.range.to}"></div>`).join('')}</div>` : ''}
-    <div class="row" style="margin-top:12px"><div style="max-width:260px"><label>Finance Reviewer name</label><input type="text" id="rev"></div><button class="btn" id="review" style="align-self:end">Approve &amp; create bill</button></div>${rejectHtml()}`;
+    ${hasRole('Finance Reviewer') ? `<div class="row" style="margin-top:12px"><span class="mut">Reviewing as <b>${esc(S.me.name)}</b></span><button class="btn" id="review">Approve &amp; create bill</button></div>` : '<p class="hint" style="margin-top:12px">Waiting for the Finance Reviewer login.</p>'}${rejectHtml()}`;
   }
   return `<h2>Billed</h2><p>Approved and sent to the bills section for payment.</p><button class="btn" id="openBill">View bill</button>`;
 }
@@ -315,9 +332,7 @@ function refreshCalc() {
   $('#totNet').textContent = money(d.totals.net); $('#totGross').textContent = money(d.totals.gross);
   const cf = $('#confirmFig'); if (cf) cf.hidden = !d.lines.some(l => l.figureSource === 'fictitious');
   $('#journalBox').innerHTML = journalHtml(d);
-  const prep = $('#prep'), keep = prep ? prep.value : '';
   $('#workflow').innerHTML = workflowHtml(d); wireWorkflow();
-  if ($('#prep') && keep) $('#prep').value = keep;
 }
 
 function wireEditor() {
@@ -345,16 +360,14 @@ function wireWorkflow() {
   const on = (id, fn) => { const el = $('#' + id); if (el) el.onclick = fn; };
   const after = async () => { await refreshLists(); viewBilling(); };
   on('submit', guard(async () => {
-    const by = $('#prep').value; store.set('docflow.by', by);
-    await save(); S.current = await api(`/documents/${d.id}/submit`, { method: 'POST', body: { by } }); await after();
+    await save(); S.current = await api(`/documents/${d.id}/submit`, { method: 'POST', body: {} }); await after();
   }));
   ed.querySelectorAll('[data-approve]').forEach(b => { b.onclick = guard(async () => {
-    const role = b.dataset.approve, by = ed.querySelector(`[data-by="${CSS.escape(role)}"]`).value;
-    S.current = await api(`/documents/${d.id}/approve`, { method: 'POST', body: { role, by } }); await after();
+    S.current = await api(`/documents/${d.id}/approve`, { method: 'POST', body: { role: b.dataset.approve } }); await after();
   }); });
   on('reject', guard(async () => {
-    const by = prompt('Your name:'); if (!by) return; const reason = prompt('Reason for returning for corrections:'); if (!reason) return;
-    S.current = await api(`/documents/${d.id}/reject`, { method: 'POST', body: { by, reason } }); await after();
+    const reason = prompt('Reason for returning for corrections:'); if (!reason) return;
+    S.current = await api(`/documents/${d.id}/reject`, { method: 'POST', body: { reason } }); await after();
   }));
   on('review', guard(async () => {
     const threeWay = {}, vendorChecks = {}, accountOverrides = {};
@@ -362,7 +375,7 @@ function wireWorkflow() {
     ed.querySelectorAll('[data-vc]').forEach(i => { vendorChecks[i.dataset.vc] = i.checked; });
     ed.querySelectorAll('[data-ov]').forEach(i => { accountOverrides[i.dataset.ov] = i.value; });
     const ack = $('#ack');
-    S.current = await api(`/documents/${d.id}/finance-review`, { method: 'POST', body: { by: $('#rev').value, threeWay, vendorChecks, accountOverrides, ackLowConfidence: ack ? ack.checked : false } });
+    S.current = await api(`/documents/${d.id}/finance-review`, { method: 'POST', body: { threeWay, vendorChecks, accountOverrides, ackLowConfidence: ack ? ack.checked : false } });
     await refreshLists(); S.bill = await api('/bills/' + S.current.billId); toast(`Created ${S.bill.number}`, null, true); go('bills');
   }));
   on('openBill', guard(async () => { S.bill = await api('/bills/' + d.billId); go('bills'); }));
@@ -380,10 +393,21 @@ async function viewBills() {
   document.querySelectorAll('[data-bill]').forEach(tr => { tr.onclick = guard(async () => { S.bill = await api('/bills/' + tr.dataset.bill); viewBills(); }); });
   wirePolicy($('#view'));
   const pr = $('#printBill'); if (pr) pr.onclick = () => window.print();
-  const pay = $('#pay'); if (pay) pay.onclick = guard(async () => { S.bill = await api(`/bills/${S.bill.id}/pay`, { method: 'POST', body: { by: $('#payer').value } }); toast('Payment processed', null, true); viewBills(); });
+  const pay = $('#pay'); if (pay) pay.onclick = guard(async () => { S.bill = await api(`/bills/${S.bill.id}/pay`, { method: 'POST', body: {} }); toast('Payment processed', null, true); viewBills(); });
   const so = $('#billSrc'); if (so) so.onclick = e => { e.preventDefault(); S.recordId = S.bill.origin.recordId; go('record'); };
 }
+function vendorBillHtml(b) {
+  const [ps, pc] = PAY[b.paymentStatus];
+  return `<div class="card"><div class="row"><h2 class="sp">${esc(b.number)} ${pill(ps, pc)}</h2></div>
+    <p class="sub">${esc(b.sourceDocument)} ${esc(b.documentNumber)} · ${esc(b.documentDate)} · ${b.currency}</p><p>${esc(b.purpose)}</p>
+    <table><thead><tr><th>Description</th><th class="n">Net</th><th class="n">VAT</th><th class="n">WHT</th><th class="n">Gross</th></tr></thead><tbody>
+    ${b.lines.map(l => `<tr><td>${esc(l.description)}</td><td class="n">${money(l.figures.net)}</td><td class="n">${money(l.figures.vat)}</td><td class="n">${money(l.figures.wht)}</td><td class="n">${money(l.figures.gross)}</td></tr>`).join('')}
+    <tr class="tot"><td>Total</td><td class="n">${money(b.totals.net)}</td><td class="n">${money(b.totals.vat)}</td><td class="n">${money(b.totals.wht)}</td><td class="n">${money(b.totals.gross)}</td></tr>
+    <tr><td colspan="4">Net payable after WHT</td><td class="n"><b>${money(b.totals.payable)}</b></td></tr></tbody></table>
+    <p>${b.paymentStatus === 'paid' ? `Paid on ${new Date(b.payment.at).toLocaleString()} · reference ${esc(b.payment.reference)}` : b.paymentStatus === 'awaiting_payment' ? `Awaiting payment of NGN ${money(b.amountDue)}.` : 'No payment due on this document.'}</p></div>`;
+}
 function billHtml(b) {
+  if (b.vendorView) return vendorBillHtml(b);
   const w = b.workflow, [ps, pc] = PAY[b.paymentStatus];
   return `<div class="card"><div class="row"><h2 class="sp">${esc(b.number)} ${pill(b.glPosting, 'ok')} ${pill(ps, pc)}</h2>
     <span class="noprint"><button class="btn sec" id="printBill">Print</button> <a class="btn" href="/api/bills/${b.id}/csv" style="text-decoration:none;display:inline-block">Download CSV</a></span></div>
@@ -396,7 +420,7 @@ function billHtml(b) {
     <h3>Journal entry</h3>${b.entries.length ? `<table><thead><tr><th>Account</th><th>Code</th><th class="n">Debit</th><th class="n">Credit</th></tr></thead><tbody>
     ${b.entries.map(e => `<tr><td style="padding-left:${e.side === 'Cr' ? 28 : 8}px">${esc(e.account)}</td><td class="mono">${e.code ?? ''}${e.memo ? ' memo' : ''}</td><td class="n">${e.side === 'Dr' ? money(e.amount) : ''}</td><td class="n">${e.side === 'Cr' ? money(e.amount) : ''}</td></tr>`).join('')}</tbody></table>` : '<p class="mut">No GL posting for this event.</p>'}
     <h3>Payment</h3>${b.paymentStatus === 'awaiting_payment' ? `<p class="sub">Amount due NGN ${money(b.amountDue)} to ${esc(b.counterparty)}${b.accountNumber ? ` · ${esc(b.accountNumber)} ${esc(b.bankName)}` : ''}. The Payment Processor must be independent of everyone who handled this document (FIN-POL-002).</p>
-      <div class="row noprint"><div style="max-width:260px"><label>Payment Processor name</label><input type="text" id="payer"></div><button class="btn" id="pay" style="align-self:end">Process payment</button></div>`
+      ${hasRole('Payment Processor') ? `<div class="row noprint"><span class="mut">Paying as <b>${esc(S.me.name)}</b></span><button class="btn" id="pay">Process payment</button></div>` : '<p class="hint">Waiting for the Payment Processor login.</p>'}`
       : b.paymentStatus === 'paid' ? `<p>${esc(b.payment.reference)} · paid by ${esc(b.payment.by)} on ${new Date(b.payment.at).toLocaleString()} to ${esc(b.payment.beneficiary.name)} (${esc(b.payment.beneficiary.accountNumber)}, ${esc(b.payment.beneficiary.bankName)})</p>
       <table><tbody>${b.payment.entries.map(e => `<tr><td style="padding-left:${e.side === 'Cr' ? 28 : 8}px">${esc(e.account)}</td><td class="mono">${e.code ?? ''}</td><td class="n">${e.side === 'Dr' ? money(e.amount) : ''}</td><td class="n">${e.side === 'Cr' ? money(e.amount) : ''}</td></tr>`).join('')}</tbody></table>`
       : '<p class="mut">This document does not create a payable (commitment, receivable or register-only event).</p>'}
@@ -416,18 +440,46 @@ async function viewParties() {
   $('#view').innerHTML = `<div class="card"><h2>Employee, vendor &amp; customer information</h2>
     <p class="sub">Source headers (name, address, account number, department) are pulled from here when a document is generated, and names found in documents are matched against it.</p>
     <div class="row">${['employee', 'vendor', 'customer'].map(k => `<button class="btn ${k === partyKind ? '' : 'sec'}" data-kind="${k}">${k}s</button>`).join('')}</div>
-    <div class="scroll" style="margin-top:10px"><table><thead><tr><th>ID</th><th>Name</th><th>Address</th><th>Account</th><th>Bank</th><th>Dept / cost centre</th></tr></thead><tbody>
-    ${list.map(p => `<tr><td class="mono">${esc(p.id)}</td><td><b>${esc(p.name)}</b></td><td>${esc(p.address)}</td><td class="mono">${esc(p.accountNumber)}</td><td>${esc(p.bankName)}</td><td>${esc(p.department)} ${esc(p.costCenter)}</td></tr>`).join('')}</tbody></table></div>
+    <div class="scroll" style="margin-top:10px"><table><thead><tr><th>ID</th><th>Name</th><th>Address</th><th>Account</th><th>Bank</th><th>Dept / cost centre</th>${partyKind === 'vendor' && hasRole('Admin') ? '<th>Login</th>' : ''}</tr></thead><tbody>
+    ${list.map(p => `<tr><td class="mono">${esc(p.id)}</td><td><b>${esc(p.name)}</b></td><td>${esc(p.address)}</td><td class="mono">${esc(p.accountNumber)}</td><td>${esc(p.bankName)}</td><td>${esc(p.department)} ${esc(p.costCenter)}</td>${partyKind === 'vendor' && hasRole('Admin') ? `<td><button class="btn sec" data-login="${p.id}">New login / reset</button></td>` : ''}</tr>`).join('')}</tbody></table></div>
+    <div id="newLogin"></div>
     <h3>Add ${partyKind}</h3><div class="grid">${[['name', 'Name'], ['address', 'Address'], ['accountNumber', 'Account number'], ['bankName', 'Bank'], ['taxId', 'Tax ID'], ['department', 'Department'], ['costCenter', 'Cost center']].map(([k, l]) => `<div><label>${l}</label><input type="text" data-p="${k}"></div>`).join('')}</div>
     <div style="margin-top:10px"><button class="btn" id="addParty">Add</button></div></div>`;
   document.querySelectorAll('[data-kind]').forEach(b => { b.onclick = () => { partyKind = b.dataset.kind; viewParties(); }; });
+  document.querySelectorAll('[data-login]').forEach(b => { b.onclick = guard(async () => {
+    const c = await api(`/parties/${b.dataset.login}/login`, { method: 'POST' });
+    $('#newLogin').innerHTML = `<ul class="issues"><li class="warning"><b>${esc(c.name)}</b> — username <code>${esc(c.username)}</code> · password <code>${esc(c.password)}</code><br>Shown once. Any previous password for this vendor no longer works.</li></ul>`;
+  }); });
   $('#addParty').onclick = guard(async () => {
     const body = { kind: partyKind }; document.querySelectorAll('[data-p]').forEach(i => { body[i.dataset.p] = i.value; });
     await api('/parties', { method: 'POST', body }); toast('Added', null, true); viewParties();
   });
 }
 
+function viewLogin(msg) {
+  S.me = null; applyChrome();
+  $('#view').innerHTML = `<div class="card" style="max-width:420px;margin:48px auto"><h2>Sign in</h2>
+    <p class="sub">Buyers (company staff) and vendors each have their own login. Logins are issued by your administrator.</p>
+    ${msg ? `<ul class="issues"><li class="warning">${esc(msg)}</li></ul>` : ''}
+    <form id="login"><div><label>Username</label><input type="text" id="u" autocomplete="username" autofocus required></div>
+    <div style="margin-top:10px"><label>Password</label><input type="password" id="pw" autocomplete="current-password" required></div>
+    <div id="lerr" class="issues" style="margin-top:10px"></div>
+    <button class="btn" style="margin-top:6px;width:100%">Sign in</button></form></div>`;
+  $('#login').onsubmit = async e => {
+    e.preventDefault();
+    try {
+      const r = await api('/auth/login', { method: 'POST', body: { username: $('#u').value, password: $('#pw').value } });
+      S.me = r.user; await bootData(); S.tab = 'upload'; render();
+    } catch (err) { $('#lerr').innerHTML = `<li class="error">${esc(err.message)}</li>`; $('#pw').value = ''; }
+  };
+}
+async function bootData() {
+  S.config = await api('/config');
+  if (!isVendor()) S.parties = await api('/parties');
+  await refreshLists();
+}
+
 (async function init() {
-  try { S.config = await api('/config'); S.parties = await api('/parties'); await refreshLists(); } catch (e) { toast(e.message); }
+  try { const r = await api('/auth/me'); S.me = r.user; await bootData(); } catch (e) { S.me = null; }
   render();
 })();

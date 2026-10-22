@@ -10,6 +10,9 @@ const { createStore } = require('./store');
 const { extractDocument, docxHtml, mimeFor } = require('./extract');
 const { processStructured, processUnstructured, STRUCTURED_TYPES } = require('./pipeline');
 const { SEED, PARTY_FIELDS, KINDS } = require('./parties');
+const auth = require('./auth');
+
+const DUMMY_HASH = auth.hashPassword('docflow-dummy');
 
 class HttpError extends Error {
   constructor(status, message, issues) { super(message); this.status = status; this.issues = issues; }
@@ -28,6 +31,7 @@ const clone = o => JSON.parse(JSON.stringify(o));
 function createService({ master, chunks = {}, storageDir = null, now = () => new Date() }) {
   const store = createStore(storageDir);
   const state = store.load() || { seq: { id: 0, doc: 0, bill: 0 }, records: {}, documents: {}, bills: {}, parties: clone(SEED) };
+  state.users = state.users || []; state.sessions = state.sessions || {};
   const buffers = new Map(); // memory-only fallback when there is no storage dir
   const persist = () => store.save(state);
   const year = () => now().getFullYear();
@@ -36,6 +40,16 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
   const mustGet = (coll, id, what) => { const v = state[coll][id]; if (!v) throw new HttpError(404, `${what} not found`); return v; };
   const str = v => (v == null ? '' : String(v).trim());
   const docs = () => Object.values(state.documents);
+
+  /* ---- who is acting. A plain string is an unrestricted internal caller (tests/scripts); an actor object comes from a login. ---- */
+  const actorOf = a => (a && typeof a === 'object' ? a : { name: str(a), role: 'buyer', approvalRoles: null, partyId: null });
+  const needBuyer = a => { if (a.role === 'vendor') throw new HttpError(403, 'Vendor logins cannot perform this action'); };
+  const needRole = (a, role) => { needBuyer(a); if (a.approvalRoles && !a.approvalRoles.includes(role)) throw new HttpError(403, `Your login (${a.name}) is not authorised to act as ${role}`); };
+  const isVendor = a => a.role === 'vendor';
+  const ownsRecord = (a, r) => !isVendor(a) || r.ownerPartyId === a.partyId || r.documentIds.some(id => state.documents[id] && state.documents[id].header.partyId === a.partyId);
+  const ownsDoc = (a, d) => !isVendor(a) || d.header.partyId === a.partyId || (state.records[d.origin.recordId] || {}).ownerPartyId === a.partyId;
+  const ownsBill = (a, b) => !isVendor(a) || b.partyId === a.partyId || (state.records[b.origin.recordId] || {}).ownerPartyId === a.partyId;
+  const ownRecord = (id, actor) => { const r = mustGet('records', id, 'Record'); if (!ownsRecord(actorOf(actor), r)) throw new HttpError(404, 'Record not found'); return r; };
 
   /* ----------------------------- documents ----------------------------- */
   function makeDocument(spec) {
@@ -135,13 +149,18 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
     }),
 
     /** Stores the upload as a record immediately; call processRecord() to run the pipeline. */
-    createRecord({ buffer, filename, intake, docType, uploadedBy }) {
+    createRecord({ buffer, filename, intake, docType, uploadedBy, actor }) {
+      const a = actorOf(actor);
+      if (isVendor(a)) {   // vendors submit their own invoices / quotes only
+        intake = 'structured'; uploadedBy = a.name;
+        docType = ['invoice_payable', 'quote'].includes(docType) ? docType : 'invoice_payable';
+      } else if (actor) uploadedBy = a.name;
       if (!['structured', 'unstructured'].includes(intake)) throw new HttpError(400, 'Choose the document type: structured or unstructured');
       if (intake === 'structured' && docType && docType !== 'auto' && !STRUCTURED_TYPES[docType]) throw new HttpError(400, 'Unknown structured document type');
       const id = uid('rec');
       const ext = path.extname(filename).toLowerCase();
       const r = {
-        id, filename, mime: mimeFor(filename), size: buffer.length, intake, docType: intake === 'structured' ? (docType || 'auto') : null, uploadedBy: str(uploadedBy),
+        id, filename, mime: mimeFor(filename), size: buffer.length, intake, docType: intake === 'structured' ? (docType || 'auto') : null, uploadedBy: str(uploadedBy), ownerPartyId: isVendor(a) ? a.partyId : null,
         uploadedAt: now().toISOString(), status: 'stored', error: null, method: null, ocrConfidence: null, lines: [], summary: null, structured: null, documentIds: [], note: null,
         file: `${id}${ext}`,
       };
@@ -150,24 +169,25 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
       return recordSummary(r);
     },
     processRecord: id => runProcessing(mustGet('records', id, 'Record')).then(recordSummary),
-    getRecord(id) {
-      const r = mustGet('records', id, 'Record');
+    getRecord(id, actor) {
+      const r = ownRecord(id, actor);
       return { ...recordSummary(r), lines: r.lines, summary: r.summary, structured: r.structured, documents: r.documentIds.filter(x => state.documents[x]).map(x => summary(state.documents[x])) };
     },
-    listRecords: () => Object.values(state.records).map(r => ({ ...recordSummary(r), documents: r.documentIds.length })).reverse(),
-    recordFile(id) {
-      const r = mustGet('records', id, 'Record');
+    listRecords: actor => Object.values(state.records).filter(r => ownsRecord(actorOf(actor), r)).map(r => ({ ...recordSummary(r), documents: r.documentIds.length })).reverse(),
+    recordFile(id, actor) {
+      const r = ownRecord(id, actor);
       return { filename: r.filename, mime: r.mime, path: store.persistent ? store.filePath(r.file) : null, buffer: store.persistent ? null : buffers.get(id) };
     },
-    async recordPreview(id) {
-      const r = mustGet('records', id, 'Record');
+    async recordPreview(id, actor) {
+      const r = ownRecord(id, actor);
       const url = `/api/records/${id}/file`;
       if (r.mime.startsWith('image/')) return { kind: 'image', url };
       if (r.mime === 'application/pdf') return { kind: 'pdf', url };
       if (r.filename.toLowerCase().endsWith('.docx')) return { kind: 'html', html: await docxHtml(readBuffer(r)) };
       return { kind: 'text', text: readBuffer(r).toString('utf8') };
     },
-    async reprocessRecord(id) {
+    async reprocessRecord(id, actor) {
+      needBuyer(actorOf(actor));
       const r = mustGet('records', id, 'Record');
       if (r.status === 'processing') throw new HttpError(409, 'Record is still processing');
       const existing = r.documentIds.map(x => state.documents[x]).filter(Boolean);
@@ -179,7 +199,8 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
 
     /* ------------------------------ parties ------------------------------ */
     listParties: kind => state.parties.filter(p => !kind || p.kind === kind),
-    createParty(body) {
+    createParty(body, actor) {
+      needBuyer(actorOf(actor));
       if (!KINDS.includes(body.kind)) throw new HttpError(400, 'kind must be employee, vendor or customer');
       if (!str(body.name)) throw new HttpError(400, 'Name is required');
       const prefix = { employee: 'EMP', vendor: 'VEN', customer: 'CUS' }[body.kind];
@@ -189,7 +210,8 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
       state.parties.push(p); persist();
       return p;
     },
-    updateParty(id, body) {
+    updateParty(id, body, actor) {
+      needBuyer(actorOf(actor));
       const p = state.parties.find(x => x.id === id);
       if (!p) throw new HttpError(404, 'Party not found');
       for (const k of PARTY_FIELDS) if (k in body) p[k] = str(body[k]);
@@ -198,10 +220,15 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
     },
 
     /* ----------------------------- documents ----------------------------- */
-    listDocuments: () => docs().map(summary).reverse(),
-    getDocument: id => view(mustGet('documents', id, 'Document')),
+    listDocuments: actor => docs().filter(d => ownsDoc(actorOf(actor), d)).map(summary).reverse(),
+    getDocument(id, actor) {
+      const a = actorOf(actor), d = mustGet('documents', id, 'Document');
+      if (!ownsDoc(a, d)) throw new HttpError(404, 'Document not found');
+      return isVendor(a) ? vendorView(view(d)) : view(d);
+    },
 
-    update(id, patch) {
+    update(id, patch, actor) {
+      needBuyer(actorOf(actor));
       const d = mustGet('documents', id, 'Document');
       if (d.status !== 'draft') throw new HttpError(409, 'Only draft documents can be edited');
       if (patch.header) {
@@ -242,10 +269,11 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
     },
 
     submit(id, by) {
-      const d = mustGet('documents', id, 'Document');
+      const a = actorOf(by), d = mustGet('documents', id, 'Document');
+      needRole(a, 'Preparer');
       if (d.status !== 'draft') throw new HttpError(409, `Document is ${d.status}`);
-      if (!str(by)) throw new HttpError(400, 'Preparer name is required');
-      d.header.preparedBy = str(by);
+      if (!a.name) throw new HttpError(400, 'Preparer name is required');
+      d.header.preparedBy = a.name;
       const errs = assess(d, master.rows, { today: today() }).issues.submit.filter(i => i.level === 'error');
       if (errs.length) throw new HttpError(422, 'Document is not ready for approval', errs);
       d.status = 'pending_approval'; d.rejection = null; persist();
@@ -253,7 +281,9 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
     },
 
     approve(id, role, by) {
-      const d = mustGet('documents', id, 'Document');
+      const actor = actorOf(by), d = mustGet('documents', id, 'Document');
+      by = actor.name;
+      needRole(actor, role);
       if (d.status !== 'pending_approval') throw new HttpError(409, `Document is ${d.status}`);
       const a = assess(d, master.rows, { today: today() });
       if (!a.requiredApprovals.some(r => r.role === role)) throw new HttpError(400, `${role} is not a required approver`);
@@ -267,7 +297,10 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
     },
 
     reject(id, by, reason) {
-      const d = mustGet('documents', id, 'Document');
+      const actor = actorOf(by), d = mustGet('documents', id, 'Document');
+      needBuyer(actor);
+      if (actor.approvalRoles && !actor.approvalRoles.some(r => r !== 'Preparer')) throw new HttpError(403, 'Only approvers and the finance reviewer can return a document');
+      by = actor.name;
       if (!['pending_approval', 'approved'].includes(d.status)) throw new HttpError(409, `Document is ${d.status}`);
       if (!str(by) || !str(reason)) throw new HttpError(400, 'Name and reason are required');
       d.status = 'draft'; d.approvals = []; d.review = emptyReview();
@@ -277,8 +310,9 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
     },
 
     /** Final approval step. On success the document becomes a bill, ready for payment. */
-    financeReview(id, { by, threeWay, vendorChecks, ackLowConfidence, accountOverrides } = {}) {
-      const d = mustGet('documents', id, 'Document');
+    financeReview(id, { by: byActor, threeWay, vendorChecks, ackLowConfidence, accountOverrides } = {}) {
+      const actor = actorOf(byActor), by = actor.name, d = mustGet('documents', id, 'Document');
+      needRole(actor, 'Finance Reviewer');
       if (d.status !== 'approved') throw new HttpError(409, `Document is ${d.status}; Finance Review follows the approvals`);
       const err = segregationError(d, by, 'Finance Reviewer');
       if (err) throw new HttpError(403, err);
@@ -296,14 +330,19 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
     },
 
     /* -------------------------------- bills ------------------------------- */
-    listBills: () => Object.values(state.bills).map(b => ({
+    listBills: actor => Object.values(state.bills).filter(b => ownsBill(actorOf(actor), b)).map(b => ({
       id: b.id, number: b.number, documentNumber: b.documentNumber, sourceDocument: b.sourceDocument, counterparty: b.counterparty,
       gross: b.totals.gross, payable: b.totals.payable, glPosting: b.glPosting, paymentStatus: b.paymentStatus, amountDue: b.amountDue, createdAt: b.createdAt, intake: b.origin.intake,
     })).reverse(),
-    getBill: id => mustGet('bills', id, 'Bill'),
+    getBill(id, actor) {
+      const a = actorOf(actor), b = mustGet('bills', id, 'Bill');
+      if (!ownsBill(a, b)) throw new HttpError(404, 'Bill not found');
+      return isVendor(a) ? vendorBill(b) : b;
+    },
 
-    payBill(id, by) {
-      const b = mustGet('bills', id, 'Bill');
+    payBill(id, byActor) {
+      const actor = actorOf(byActor), by = actor.name, b = mustGet('bills', id, 'Bill');
+      needRole(actor, 'Payment Processor');
       if (b.paymentStatus !== 'awaiting_payment') throw new HttpError(409, b.paymentStatus === 'paid' ? 'Bill is already paid' : 'This bill does not require payment');
       const d = state.documents[b.documentId];
       const err = segregationError(d, by, 'Payment Processor');
@@ -319,7 +358,9 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
       return b;
     },
 
-    billCsv(id) {
+    billCsv(id, actor) {
+      const a = actorOf(actor);
+      needBuyer(a);
       const b = mustGet('bills', id, 'Bill');
       return toCsv([
         ['Bill', b.number], ['Source document', b.documentNumber], ['Counterparty', b.counterparty], ['Date', b.documentDate], [],
@@ -330,6 +371,83 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
     policyChunk: id => chunks[id] || null,
     policyChunks: () => Object.values(chunks).map(({ id, title }) => ({ id, title })),
   };
+
+  /** What a vendor may see of a document: the paper, its status and totals — no internal controls. */
+  function vendorView(v) {
+    return {
+      id: v.id, number: v.number, sourceDocument: v.sourceDocument, status: v.status, origin: { recordId: v.origin.recordId, intake: v.origin.intake, filename: v.origin.filename },
+      company: v.company, header: { ...v.header, preparedBy: undefined }, refs: v.refs, billId: v.billId, createdAt: v.createdAt,
+      lines: v.lines.map(l => ({ id: l.id, description: l.description, event: l.event, phrase: l.phrase, quantity: l.quantity, figureSource: l.figureSource, figures: l.figures })),
+      totals: v.totals, vendorView: true,
+    };
+  }
+  function vendorBill(b) {
+    return {
+      id: b.id, number: b.number, documentNumber: b.documentNumber, sourceDocument: b.sourceDocument, counterparty: b.counterparty, documentDate: b.documentDate,
+      purpose: b.purpose, currency: b.currency, totals: b.totals, paymentStatus: b.paymentStatus, amountDue: b.amountDue, createdAt: b.createdAt, vendorView: true,
+      payment: b.payment ? { reference: b.payment.reference, at: b.payment.at } : null,
+      lines: b.lines.map(l => ({ event: l.event, description: l.description, figures: l.figures })),
+    };
+  }
+
+  /* ------------------------------ logins ------------------------------ */
+  const publicUser = u => ({ id: u.id, username: u.username, name: u.name, role: u.role, title: u.title, partyId: u.partyId, approvalRoles: u.approvalRoles });
+  const makeUser = (profile, password) => ({ id: uid('usr'), ...profile, passwordHash: auth.hashPassword(password), createdAt: now().toISOString(), active: true });
+  Object.assign(svc, {
+    /** Creates login profiles with fresh random passwords. reset replaces every login (and ends all sessions); otherwise only missing ones are added. Passwords are returned once and never stored in clear. */
+    generateLogins({ reset = true } = {}) {
+      const wanted = auth.buildProfiles(state.parties);
+      if (reset) { state.users = []; state.sessions = {}; }
+      const have = new Set(state.users.map(u => u.username));
+      const out = [];
+      for (const profile of wanted) {
+        if (have.has(profile.username)) continue;
+        const password = auth.generatePassword();
+        state.users.push(makeUser(profile, password));
+        out.push({ username: profile.username, password, name: profile.name, role: profile.role, title: profile.title, partyId: profile.partyId, approvalRoles: profile.approvalRoles });
+      }
+      persist();
+      return out;
+    },
+    /** Creates or resets one vendor's login (Admin only). The new password is returned once. */
+    resetPartyLogin(partyId, actor) {
+      needRole(actorOf(actor), 'Admin');
+      const p = state.parties.find(x => x.id === partyId);
+      if (!p || p.kind !== 'vendor') throw new HttpError(404, 'Vendor not found');
+      const profile = auth.buildProfiles([p])[auth.BUYERS.length];
+      const password = auth.generatePassword();
+      const existing = state.users.find(u => u.partyId === partyId);
+      if (existing) {
+        existing.passwordHash = auth.hashPassword(password);
+        const mine = Object.entries(state.sessions).filter(([, v]) => v.userId === existing.id).map(([k]) => k);
+        mine.forEach(k => delete state.sessions[k]);
+      } else state.users.push(makeUser(profile, password));
+      persist();
+      return { username: (existing || profile).username, password, name: p.name, role: 'vendor', partyId };
+    },
+    listUsersFor(actor) { needRole(actorOf(actor), 'Admin'); return state.users.map(publicUser); },
+    hasUsers: () => state.users.length > 0,
+    listUsers: () => state.users.map(publicUser),
+    login(username, password) {
+      const u = state.users.find(x => x.username === String(username || '').trim().toLowerCase() && x.active);
+      // verify against a dummy hash when the user is unknown so timing does not reveal valid usernames
+      const ok = auth.verifyPassword(password, u ? u.passwordHash : DUMMY_HASH);
+      if (!u || !ok) return null;
+      const token = require('crypto').randomBytes(32).toString('hex');
+      state.sessions[auth.sha(token)] = { userId: u.id, expires: now().getTime() + auth.SESSION_TTL_MS };
+      for (const [k, v] of Object.entries(state.sessions)) if (v.expires < now().getTime()) delete state.sessions[k];
+      persist();
+      return { token, user: publicUser(u) };
+    },
+    userForToken(token) {
+      if (!token) return null;
+      const s = state.sessions[auth.sha(token)];
+      if (!s || s.expires < now().getTime()) return null;
+      const u = state.users.find(x => x.id === s.userId && x.active);
+      return u ? publicUser(u) : null;
+    },
+    logout(token) { if (token) { delete state.sessions[auth.sha(token)]; persist(); } },
+  });
 
   function makeBill(d) {
     const a = assess(d, master.rows, { today: today() });
@@ -346,7 +464,7 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
     const amountDue = Math.round(entries.filter(e => e.side === 'Cr' && PAYABLE_ACCOUNTS.includes(e.account)).reduce((s, e) => s + e.amount, 0) * 100) / 100;
     const bill = {
       id: uid('bill'), number: `BILL-${year()}-${String(++state.seq.bill).padStart(5, '0')}`, createdAt: now().toISOString(),
-      documentId: d.id, documentNumber: d.number, sourceDocument: d.sourceDocument, origin: d.origin,
+      documentId: d.id, partyId: d.header.partyId, documentNumber: d.number, sourceDocument: d.sourceDocument, origin: d.origin,
       counterparty: d.header.counterparty, address: d.header.address, accountNumber: d.header.accountNumber, bankName: d.header.bankName,
       department: d.header.department, costCenter: d.header.costCenter, documentDate: d.header.documentDate, purpose: d.header.purpose, currency: 'NGN', refs: d.refs,
       totals: a.totals, entries, glPosting: entries.length ? 'Ready to post' : 'No GL posting (commitment / register only)',

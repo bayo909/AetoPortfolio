@@ -43,6 +43,27 @@ the processed document on the right (summary + generated documents, or the parse
 Segregation of duties (FIN-POL-002 / GOV-001): preparer, each approver, finance reviewer and payment processor must be
 different people; nobody may act on a document where they are the counterparty.
 
+## Logins
+
+Everything except the sign-in page and `/api/config` requires a session. Two kinds of login:
+
+- **Buyers** (company staff). Each carries the policy role(s) it may act as: *Preparer* (upload, correct, submit), *Department Manager*,
+  *Finance*, *Head of Department*, *Finance Manager*, *Business Unit Head*, *CFO*, *CEO / Executive Committee*, *Additional Approver*
+  (approvals), *Finance Reviewer* (final approval → bill), *Payment Processor* (pay), *Admin* (manages parties and vendor logins; cannot approve or pay).
+  The acting name comes from the login, never from a typed field, so the segregation-of-duties checks (FIN-POL-002) cannot be sidestepped.
+- **Vendors**: one login per vendor. They upload their own invoices/quotes (always matched to their own vendor record) and see only
+  their own records, documents and bills — status, amounts and payment reference, not the journal or the control trail.
+
+Passwords are random, shown **once**, and stored only as scrypt hashes. Sessions are server-side, HttpOnly + SameSite=Lax cookies (12 h);
+5 wrong passwords lock that username+IP for 10 minutes.
+
+```bash
+npm run logins                 # (re)generate ALL logins; old passwords stop working. Stop the server first.
+npm run logins -- --missing    # only add logins that do not exist yet (e.g. after adding a vendor)
+```
+First start with no logins generates them automatically and prints the sheet (also saved to `storage/logins.txt`, mode 0600 — delete it once distributed).
+A single vendor's login can also be created/reset by an Admin on the **Parties** tab.
+
 ## Run
 
 ```bash
@@ -55,7 +76,7 @@ State persists in `storage/` (uploaded files + `db.json`, git-ignored). OCR is o
 
 ## Known limits
 
-- No authentication: names are typed in; segregation checks compare names, not logged-in users.
+- Logins are username/password only (no MFA, password-change screen or self-service reset); put it behind HTTPS when hosted (the cookie is marked Secure on HTTPS requests).
 - Summary is extractive and rule-based (no LLM); matching is lexical (tokens, stems, synonyms). Parsing handles labelled
   and tabular invoices, not arbitrary layouts. OCR quality bounds extraction quality; low confidence is flagged.
 - Scanned PDFs need `pdftoppm` (poppler-utils) on the server. English OCR only. Max 6 pages OCR'd per PDF.

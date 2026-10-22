@@ -49,7 +49,7 @@ function processStructured(ctx, record) {
   const prepared = prepareRows(rows);
   const fallback = rows.find(r => r.financialEvent === T.defaultEvent) || rows[0];
   const fullText = record.lines.map(l => l.text).join('\n');
-  const party = pickParty(fullText, ctx.parties, T.kinds, parsed.partyName);
+  const party = record.ownerPartyId ? ctx.parties.find(p => p.id === record.ownerPartyId) : pickParty(fullText, ctx.parties, T.kinds, parsed.partyName);
 
   const notes = [...parsed.warnings];
   const lines = parsed.items.map(it => {
