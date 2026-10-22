@@ -172,7 +172,8 @@ module.exports = function rtfepeService(core) {
         audit.record(ctx.orgId, { actorId: ctx.userId, actorOrgId: ctx.orgId, action: 'events.imported', objectType: 'financial_event_batch', objectId: b.id, next: { filename, rows: rows.length, isDemo } });
         return b;
       });
-      engines.delete(ctx.orgId); // rebuilt on next use; rows are append-only so earlier documents keep their references
+      const live = engines.get(ctx.orgId);
+      if (live) { const m = loadMaster(ctx.orgId); live.master.rows.length = 0; live.master.rows.push(...m.rows); live.master.sourceDocuments = m.sourceDocuments; } // in place: rows are append-only so earlier documents keep their references
       return { batchId: batch.id, rows: rows.length, warnings: issues, ignoredColumns: extraColumns };
     },
     listEvents(ctx, { q = '', sourceDocument = '' } = {}) {

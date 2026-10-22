@@ -219,7 +219,7 @@ module.exports = function commerceService(core) {
       });
       return svc.getQuote(ctx, id);
     },
-    rejectQuote(ctx, id, { reason }) {
+    rejectQuote(ctx, id, { reason } = {}) {
       ctx.require('quote.approve');
       if (!String(reason || '').trim()) throw bad('A reason is required');
       const q = db.get('SELECT * FROM quotations WHERE id = ? AND vendor_org_id = ?', id, ctx.orgId);
@@ -377,7 +377,7 @@ module.exports = function commerceService(core) {
       });
       return svc.getInvoice(ctx, id);
     },
-    rejectInvoice(ctx, id, { reason }) {
+    rejectInvoice(ctx, id, { reason } = {}) {
       ctx.require('invoice.approve');
       if (!String(reason || '').trim()) throw bad('A reason is required');
       const i = db.get('SELECT * FROM invoices WHERE id = ? AND vendor_org_id = ?', id, ctx.orgId);

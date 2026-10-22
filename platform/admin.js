@@ -104,7 +104,8 @@ module.exports = function adminService(core) {
         approvals: db.all("SELECT d.decision, d.comment, d.at, u.name actor FROM approval_decisions d JOIN users u ON u.id = d.actor_id WHERE d.subject_type = 'bill' AND d.subject_id = ? ORDER BY d.at", billId),
         payments: intents.map(i => ({ intentId: i.id, status: i.status, initiatedBy: name(i.initiated_by), authorizedBy: name(i.authorized_by), receiptNo: i.receipt_no, providerRef: i.provider_ref })),
         journals: core.svc.ledger.journal(ctx, { billId }),
-        events: svc.auditTrail(ctx, { objectId: billId }),
+        events: db.all(`SELECT a.*, u.name actor FROM audit_events a LEFT JOIN users u ON u.id = a.actor_id WHERE a.org_id = ? AND (a.object_id = ? OR a.refs_json LIKE ? OR a.object_id IN (SELECT id FROM payment_intents WHERE bill_id = ?) OR a.object_id IN (SELECT id FROM payment_transactions WHERE bill_id = ?) OR a.object_id IN (SELECT id FROM journal_entries WHERE bill_id = ?)) ORDER BY a.seq`,
+          ctx.orgId, billId, `%"${billId}"%`, billId, billId, billId).map(r => ({ seq: r.seq, at: r.at, actor: r.actor || 'System', action: r.action, objectType: r.object_type, objectId: r.object_id, reason: r.reason })),
       };
     },
     accessLog(ctx) { ctx.require('audit.view'); return db.all("SELECT method, path, status, at, user_id FROM access_logs WHERE org_id = ? AND sensitive = 1 ORDER BY at DESC LIMIT 100", ctx.orgId); },

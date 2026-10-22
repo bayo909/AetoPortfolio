@@ -85,7 +85,7 @@ module.exports = function complianceService(core) {
       ctx.require('kyb.manage');
       const k = latestCase(ctx.orgId);
       if (!['draft', 'rejected'].includes(k.status)) throw conflict(`KYB case is ${k.status}`);
-      const clean = {};
+      const clean = { ...JSON.parse(k.data_json) }; // partial saves merge into what is already recorded
       const cfg = config(k.country);
       for (const f of cfg.fields) if (data[f.key] != null) clean[f.key] = f.type === 'text' ? String(data[f.key]).trim() : data[f.key];
       db.tx(() => {

@@ -378,7 +378,7 @@ module.exports = function billsService(core) {
       if (already) return 'Each approval step must be given by a different person';
       return null;
     },
-    decide(ctx, stepId, { decision, comment = '' }) {
+    decide(ctx, stepId, { decision, comment = '' } = {}) {
       ctx.require('bill.approve');
       if (!['approved', 'rejected'].includes(decision)) throw bad('Decision must be approved or rejected');
       const step = db.get('SELECT * FROM approval_steps WHERE id = ? AND org_id = ?', stepId, ctx.orgId);

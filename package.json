@@ -1,16 +1,19 @@
 {
-  "name": "aeto-docflow",
+  "name": "payuno-flow",
   "version": "0.1.0",
-  "description": "MVP: extract unstructured documents, convert line items to source documents, process to bills under the PayUno finance policy",
+  "description": "PayUno Flow: multi-tenant B2B billing, collaboration and wallet payment platform with the RT-FEPE document engine (sandbox payments)",
   "private": true,
   "type": "commonjs",
-  "main": "server.js",
+  "main": "platform/server.js",
   "scripts": {
-    "start": "node server.js",
-    "test": "node --test \"test/*.test.js\""
+    "start": "node platform/server.js",
+    "start:docflow": "node docflow-server.js",
+    "seed": "node scripts/reset-demo.js",
+    "test": "node --test --test-force-exit \"test/*.test.js\" \"test/platform/*.test.js\"",
+    "test:platform": "node --test --test-force-exit \"test/platform/*.test.js\""
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "^1.0.0",

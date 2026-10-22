@@ -82,7 +82,9 @@ async function seed(core) {
   member('funmi', apex, 'funmi', 'Funmi Adebayo', 'funmi.adebayo@apex.example', 'procurement_officer', { limit: 2_000_000, dept: 'Operations', cc: 'CC-OPS-30', bank: ['Access Bank', '0678912345'] });
   member('tunde', apex, 'tunde', 'Tunde Bakare', 'tunde.bakare@apex.example', 'finance_officer', { limit: 2_000_000, dept: 'Finance', cc: 'CC-FIN-20', bank: ['Access Bank', '0234567891'], address: '7 Adeola Odeku Street, Victoria Island, Lagos' });
   member('kunle', apex, 'kunle', 'Kunle Raji', 'kunle.raji@apex.example', 'finance_officer', { limit: 500_000, dept: 'Finance', cc: 'CC-FIN-20', bank: ['Zenith Bank', '0789123456'] });
+  member('lola', apex, 'lola', 'Lola Ade', 'lola.ade@apex.example', 'finance_officer', { limit: 500_000, dept: 'Finance', cc: 'CC-FIN-20', bank: ['Fidelity Bank', '0123987654'] });
   member('ngozi', apex, 'ngozi', 'Ngozi Eze', 'ngozi.eze@apex.example', 'finance_approver', { limit: 500_000_000, dept: 'Finance', cc: 'CC-FIN-20', bank: ['First Bank', '0345678912'], address: '3 Aminu Kano Crescent, Wuse 2, Abuja' });
+  member('seun', apex, 'seun', 'Seun Alabi', 'seun.alabi@apex.example', 'finance_approver', { limit: 100_000_000, dept: 'Finance', cc: 'CC-FIN-20', bank: ['Stanbic IBTC', '0912345678'] });
   member('ibrahim', apex, 'ibrahim', 'Ibrahim Musa', 'ibrahim.musa@apex.example', 'accountant', { dept: 'Finance', cc: 'CC-FIN-20', bank: ['Zenith Bank', '0456789123'] });
   member('bola', apex, 'bola', 'Bola Adewale', 'bola.adewale@apex.example', 'employee', { dept: 'Claims', cc: 'CC-CLM-10', bank: ['GTBank', '0891234567'] });
   for (const [code, name, dept] of [['CC-EXE-00', 'Executive Office', 'Executive'], ['CC-CLM-10', 'Claims', 'Claims'], ['CC-FIN-20', 'Finance', 'Finance'], ['CC-OPS-30', 'Operations', 'Operations'], ['CC-IT-40', 'Information Technology', 'IT'], ['CC-LEG-50', 'Legal', 'Legal'], ['CC-ADM-70', 'Administration', 'Administration']])
@@ -200,7 +202,7 @@ async function seed(core) {
   const q7 = await draftQuote('kemi', 'seyi', rfq7);
   svc.commerce.submitQuote(as('kemi'), q7.id); svc.commerce.approveQuote(as('seyi'), q7.id, {}); svc.commerce.acceptQuote(as('funmi'), q7.id);
   let inv7 = svc.commerce.createInvoice(as('kemi'), { quoteId: q7.id });
-  svc.commerce.submitInvoice(as('kemi'), inv7.id); svc.commerce.approveInvoice(as('seyi'), inv7.id); svc.commerce.issueInvoice(as('seyi'), inv7.id);
+  svc.commerce.submitInvoice(as('kemi'), inv7.id); svc.commerce.approveInvoice(as('seyi'), inv7.id); inv7 = svc.commerce.issueInvoice(as('seyi'), inv7.id);
 
   /* ============== scenario E: employee expense + RT-FEPE documents ============== */
   svc.bills.submitExpense(as('bola'), { description: 'Client meeting transport — Lagos to Ibadan', category: 'travel', amount: '38500', incurredOn: iso(new Date(core.now().getTime() - 5 * 86400e3)).slice(0, 10), costCenter: 'CC-CLM-10' }, null);
@@ -220,14 +222,14 @@ async function seed(core) {
   svc.bills.confirmReceipt(as('chidi'), inv8.billId); svc.bills.submit(as('tunde'), inv8.billId);
   const period = core.today().slice(0, 7);
   svc.ledger.setPeriod(as('ibrahim'), period, true);
-  for (const [who, slot] of [['funmi', 'dept_approver'], ['kunle', 'finance']]) svc.bills.decide(as(who), stepsOf(inv8.billId).find(s => s.slot === slot).id, { decision: 'approved' });
+  for (const [who, slot] of [['funmi', 'dept_approver'], ['ngozi', 'finance']]) svc.bills.decide(as(who), stepsOf(inv8.billId).find(s => s.slot === slot).id, { decision: 'approved' });
   svc.ledger.setPeriod(as('ibrahim'), period, false);
 
   // a few channel messages so the workspace is not empty
   const ch = db.get("SELECT * FROM channels WHERE kind='vendor' AND org_id = ? AND vendor_org_id = ?", apex.id, sec('securetech'));
   svc.chat.post(as('funmi'), ch.id, { body: 'Welcome to the Apex workspace, SecureTech team. Please raise quotes and invoices against our RFQs here.' });
   svc.chat.post(as('seyi'), ch.id, { body: 'Thanks @Funmi — happy to be onboarded. Our AI Billing Agent can answer catalogue questions with @agent.' });
-  return { demoPassword: DEMO_PASSWORD, inviteToken: DEMO_INVITE_TOKEN };
+  return { demoPassword: DEMO_PASSWORD, inviteToken: DEMO_INVITE_TOKEN, as, people, orgs: { apex, green, platform, vendors }, wallets: { wOpex, wCapex, wReimb, wLow, wDecline }, bills: { paid: bill1, approved: inv2.billId, capexPending: inv3.billId, rejected: inv4.billId, received: inv7.billId, postingFailed: inv8.billId } };
 }
 
 module.exports = { seed, DEMO_PASSWORD, DEMO_INVITE_TOKEN };

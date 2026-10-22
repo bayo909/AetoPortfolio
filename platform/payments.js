@@ -39,7 +39,7 @@ module.exports = function paymentsService(core) {
     perTxnLimitMinor: w.per_txn_limit_minor, dualControlMinor: w.dual_control_minor, department: w.department, project: w.project, sandboxBehavior: w.sandbox_behavior, simulated: !!w.is_simulated, status: w.status });
 
   function walletKindOk(bill, wallet) {
-    if (bill.source === 'expense') return ['reimbursement', 'opex'].includes(wallet.kind);
+    if (bill.source === 'expense' || bill.beneficiary_user_id) return ['reimbursement', 'opex'].includes(wallet.kind);   // employee reimbursements
     return wallet.kind === bill.classification;
   }
 
@@ -59,7 +59,7 @@ module.exports = function paymentsService(core) {
     if (wallet) {
       if (wallet.status !== 'active') reasons.push({ code: 'wallet_frozen', msg: 'Wallet is frozen' });
       if (wallet.currency !== bill.currency) reasons.push({ code: 'currency', msg: `Wallet currency ${wallet.currency} does not match bill currency ${bill.currency}` });
-      if (!walletKindOk(bill, wallet)) reasons.push({ code: 'wallet_kind', msg: `A ${bill.classification.toUpperCase()} bill must be paid from a ${bill.source === 'expense' ? 'reimbursement/OPEX' : bill.classification.toUpperCase()} wallet` });
+      if (!walletKindOk(bill, wallet)) reasons.push({ code: 'wallet_kind', msg: `This bill must be paid from a ${bill.source === 'expense' || bill.beneficiary_user_id ? 'reimbursement or OPEX' : bill.classification.toUpperCase()} wallet, not a ${wallet.kind.toUpperCase()} wallet` });
       if (wallet.per_txn_limit_minor && bill.payable_minor > wallet.per_txn_limit_minor) reasons.push({ code: 'wallet_limit', msg: `Exceeds the wallet's per-transaction limit of ${fmt(wallet.per_txn_limit_minor, wallet.currency)}` });
       if (wallet.balance_minor - wallet.reserved_minor < bill.payable_minor) reasons.push({ code: 'insufficient_funds', msg: `Insufficient wallet balance: ${fmt(wallet.balance_minor - wallet.reserved_minor, wallet.currency)} available, ${fmt(bill.payable_minor, wallet.currency)} needed` });
     }
@@ -162,7 +162,7 @@ module.exports = function paymentsService(core) {
     },
 
     /* ------------------------------ payment intents ------------------------------ */
-    createIntent(ctx, { billId, walletId, idempotencyKey, scanId = null }) {
+    createIntent(ctx, { billId, walletId, idempotencyKey, scanId = null } = {}) {
       ctx.require('payment.initiate');
       if (!/^[A-Za-z0-9_-]{8,80}$/.test(idempotencyKey || '')) throw bad('An idempotency key (8–80 URL-safe characters) is required');
       const existing = db.get('SELECT * FROM payment_intents WHERE org_id = ? AND idempotency_key = ?', ctx.orgId, idempotencyKey);
@@ -219,7 +219,7 @@ module.exports = function paymentsService(core) {
     },
 
     /** Step-up authentication (password) + execution. Safe to call twice: a finished payment returns its result and never debits again. */
-    execute(ctx, id, { password }) {
+    execute(ctx, id, { password } = {}) {
       ctx.require('payment.execute');
       const i = db.get('SELECT * FROM payment_intents WHERE id = ? AND org_id = ?', id, ctx.orgId);
       if (!i) throw notFound('Payment');

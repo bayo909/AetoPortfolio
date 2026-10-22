@@ -206,7 +206,8 @@ function createApp(opts = {}) {
   g('/docs/records/:id', (req, s, ctx) => svc.rtfepe.getRecord(ctx, req.params.id));
   app.get('/api/docs/records/:id/file', authed((req, res, ctx) => {
     const f = svc.rtfepe.recordFile(ctx, req.params.id);
-    res.set({ 'Content-Type': f.mime, 'Content-Disposition': `inline; filename="${encodeURIComponent(f.filename)}"`, 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox" });
+    const viewable = f.mime === 'application/pdf' || /^image\//.test(f.mime);   // browsers sandbox their own PDF/image viewers; everything else is served inert
+    res.set({ 'Content-Type': f.mime, 'Content-Disposition': `inline; filename="${encodeURIComponent(f.filename)}"`, 'X-Content-Type-Options': 'nosniff', ...(viewable ? {} : { 'Content-Security-Policy': "default-src 'none'; sandbox" }) });
     if (f.path) res.sendFile(f.path); else res.send(f.buffer);
   }));
   g('/docs/records/:id/preview', (req, s, ctx) => svc.rtfepe.recordPreview(ctx, req.params.id));
