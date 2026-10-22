@@ -4,11 +4,8 @@ const path = require('path');
 
 const POLICY_FILE = path.join(__dirname, '..', 'data', 'PayUno_Finance_Operations_Policy.docx');
 
-/** Splits the policy .docx into its "CHUNK nnn — title" sections, keyed by Chunk ID. */
-async function loadPolicyChunks(file = POLICY_FILE) {
-  if (!fs.existsSync(file)) return {};
-  const mammoth = require('mammoth');
-  const { value } = await mammoth.extractRawText({ path: file });
+/** Splits extracted policy text into its "CHUNK nnn — title" sections, keyed by Chunk ID. */
+function parseChunks(value) {
   const chunks = {};
   const parts = value.split(/\n(?=CHUNK \d{3} — )/);
   for (const p of parts) {
@@ -19,6 +16,13 @@ async function loadPolicyChunks(file = POLICY_FILE) {
     chunks[id[1]] = { id: id[1], number: head[1], title: head[2].trim(), text: body };
   }
   return chunks;
+}
+
+async function loadPolicyChunks(file = POLICY_FILE) {
+  if (!fs.existsSync(file)) return {};
+  const mammoth = require('mammoth');
+  const { value } = await mammoth.extractRawText({ path: file });
+  return parseChunks(value);
 }
 
 // FIN-POL-001: approval thresholds (NGN)
@@ -71,6 +75,6 @@ function businessDaysBetween(fromIso, toIso) {
 }
 
 module.exports = {
-  loadPolicyChunks, approvalTier, requiredApprovals, businessDaysBetween,
+  loadPolicyChunks, parseChunks, approvalTier, requiredApprovals, businessDaysBetween,
   COMPANY, LOW_CONFIDENCE, THREE_WAY_CHECKS, VENDOR_CHECKS, APPROVAL_TIERS, ADDITIONAL_APPROVAL,
 };

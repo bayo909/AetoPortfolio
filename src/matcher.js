@@ -54,7 +54,7 @@ function coverage(phraseTokens, lineSet) {
 }
 
 function prepareRows(rows) {
-  return rows.map(r => ({ row: r, phraseTokens: tokenize(r.phrase), eventTokens: tokenize(r.financialEvent), phraseNorm: tokenize(r.phrase).join(' ') }));
+  return rows.filter(r => !r.inactive).map(r => ({ row: r, phraseTokens: tokenize(r.phrase), eventTokens: tokenize(r.financialEvent), phraseNorm: tokenize(r.phrase).join(' ') }));
 }
 
 const MIN_SCORE = 0.5; // one generic shared word (e.g. "expense") must not create a match
@@ -73,7 +73,7 @@ function scoreLine(lineText, prepared) {
 
 /** Returns, for a source document type, the ranked candidate events for each line. */
 function matchLines(lines, masterRows, sourceDocument) {
-  const prepared = prepareRows(masterRows.filter(r => r.sourceDocument === sourceDocument));
+  const prepared = prepareRows(masterRows.filter(r => r.sourceDocument === sourceDocument && !r.inactive));
   return lines.map(l => {
     const candidates = scoreLine(l.text, prepared).slice(0, 3);
     const best = candidates[0];

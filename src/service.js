@@ -25,9 +25,10 @@ const emptyReview = () => ({ threeWay: {}, vendorChecks: {}, ackLowConfidence: f
 const PAYABLE_ACCOUNTS = ['Accounts Payable', 'Employee Payable'];
 const clone = o => JSON.parse(JSON.stringify(o));
 
-function createService({ master, chunks = {}, storageDir = null, now = () => new Date() }) {
+function createService({ master, chunks = {}, storageDir = null, now = () => new Date(), parties = null, hooks = {} }) {
   const store = createStore(storageDir);
-  const state = store.load() || { seq: { id: 0, doc: 0, bill: 0 }, records: {}, documents: {}, bills: {}, parties: clone(SEED) };
+  const state = store.load() || { seq: { id: 0, doc: 0, bill: 0 }, records: {}, documents: {}, bills: {}, parties: clone(parties || SEED) };
+  if (parties) state.parties = clone(parties); // the platform owns the party master when embedded
   const buffers = new Map(); // memory-only fallback when there is no storage dir
   const persist = () => store.save(state);
   const year = () => now().getFullYear();
@@ -77,7 +78,7 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
         event: l.row.financialEvent, phrase: l.row.phrase, journalEntry: l.row.journalEntry, debitAccount: l.row.debitAccount, creditAccount: l.row.creditAccount,
         glPosting: l.row.glPosting, statementImpact: l.row.statementImpact, figures: l.figs, journal: l.journal,
       })),
-      events: master.rows.filter(r => r.sourceDocument === d.sourceDocument).map(r => ({ rowIndex: r.index, event: r.financialEvent, phrase: r.phrase, journalEntry: r.journalEntry })),
+      events: master.rows.filter(r => r.sourceDocument === d.sourceDocument && !r.inactive).map(r => ({ rowIndex: r.index, event: r.financialEvent, phrase: r.phrase, journalEntry: r.journalEntry })),
       totals: a.totals, journal: a.journal, balanced: a.balanced, tier: a.tier,
       requiredApprovals: a.requiredApprovals.map(r => ({ ...r, approval: d.approvals.find(x => x.role === r.role) || null })),
       accountsNeedingCode: a.accountsNeedingCode, issues: a.issues,
@@ -177,6 +178,21 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
       return recordSummary(await runProcessing(r));
     },
 
+    setParties(list) { state.parties = clone(list); persist(); },
+    /** Re-runs Financial Event matching for every line of a draft document and reports ranked candidates with reasons. */
+    rematch(id) {
+      const d = mustGet('documents', id, 'Document');
+      if (d.status !== 'draft') throw new HttpError(409, 'Only draft documents can be re-matched');
+      const report = d.lines.map(l => {
+        const cands = matchLines([{ n: 0, text: l.description || '' }], master.rows, d.sourceDocument)[0].candidates;
+        const top = cands[0];
+        if (top && top.score > (l.confidence || 0) + 0.001) { l.rowIndex = top.row.index; l.confidence = top.score; }
+        return { lineId: l.id, candidates: cands.map(c => ({ rowIndex: c.row.index, event: c.row.financialEvent, phrase: c.row.phrase, score: c.score,
+          reasons: [c.phraseCoverage >= 1 ? 'High Frequency Phrase found in the text' : `${Math.round(c.phraseCoverage * 100)}% of the phrase words found`, `${Math.round(c.eventCoverage * 100)}% of the Financial Event words found`] })) };
+      });
+      persist();
+      return { document: view(d), report };
+    },
     /* ------------------------------ parties ------------------------------ */
     listParties: kind => state.parties.filter(p => !kind || p.kind === kind),
     createParty(body) {
@@ -291,6 +307,10 @@ function createService({ master, chunks = {}, storageDir = null, now = () => new
       if (errs.length) { persist(); throw new HttpError(422, 'Finance review incomplete', errs); }
       d.review.by = str(by); d.review.at = now().toISOString();
       const bill = makeBill(d);
+      if (hooks.onBill) {
+        try { hooks.onBill({ doc: view(d), bill, rawDoc: d }); }
+        catch (e) { delete state.bills[bill.id]; d.review.by = null; d.review.at = null; persist(); throw e; }
+      }
       d.status = 'billed'; d.billId = bill.id; persist();
       return view(d);
     },
